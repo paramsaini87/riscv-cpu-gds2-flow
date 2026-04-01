@@ -1,0 +1,25 @@
+{
+    "DESIGN_NAME": "rv32i_cpu",
+    "VERILOG_FILES": [
+        "dir::src/rv32i_cpu.v"
+    ],
+    "CLOCK_PORT": "clk",
+    "CLOCK_PERIOD": 25.0,
+    "FALLBACK_SDC_FILE": "dir::src/rv32i_cpu.sdc",
+    "FP_CORE_UTIL": 40,
+    "PL_TARGET_DENSITY_PCT": 45,
+    "RUN_CTS": true,
+    "RUN_FILL_INSERTION": true,
+    "RUN_LINTER": false,
+    "DESIGN_REPAIR_TIE_FANOUT": false,
+    "PL_RESIZER_HOLD_MAX_BUFFER_PCT": 100,
+    "RUN_ANTENNA_REPAIR": true,
+    "DIODE_ON_PORTS": "both",
+    "FP_PDN_VPITCH": 50,
+    "FP_PDN_HPITCH": 50,
+    "pdk::sky130*": {
+        "scl::sky130_fd_sc_hd": {
+            "CLOCK_PERIOD": 25.0
+        }
+    }
+}

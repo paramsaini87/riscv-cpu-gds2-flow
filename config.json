@@ -1,0 +1,14 @@
+{
+    "DESIGN_NAME": "rv32i_cpu",
+    "VERILOG_FILES": ["dir::src/rv32i_cpu.v"],
+    "CLOCK_PORT": "clk",
+    "CLOCK_PERIOD": 25.0,
+    "FP_CORE_UTIL": 40,
+    "PL_TARGET_DENSITY_PCT": 45,
+    "RUN_CTS": true,
+    "RUN_FILL_INSERTION": true,
+    "FALLBACK_SDC_FILE": "dir::src/rv32i_cpu.sdc",
+    "DIODE_ON_PORTS": "both",
+    "RUN_HEURISTIC_DIODE_INSERTION": true,
+    "GRT_REPAIR_ANTENNAS": true
+}
