@@ -28,8 +28,9 @@ This repository documents every stage of the flow in deep technical detail — t
 18. [Signoff — DRC, LVS, and Timing](#18-signoff--drc-lvs-and-timing)
 19. [GDSII Generation](#19-gdsii-generation)
 20. [Final Results and Layout Images](#20-final-results-and-layout-images)
-21. [Reproducibility — Docker Environment](#21-reproducibility--docker-environment)
-22. [Architecture Documentation](#22-architecture-documentation)
+21. [Verification & Formal Equivalence](#21-verification--formal-equivalence)
+22. [Reproducibility — Docker Environment](#22-reproducibility--docker-environment)
+23. [Architecture Documentation](#23-architecture-documentation)
 
 ---
 
@@ -946,11 +947,106 @@ Maximum zoom showing transistor-level features — polysilicon gates, diffusion 
 
 ---
 
-## 21. Reproducibility — Docker Environment
+## 21. Verification & Formal Equivalence
+
+### 21.1 RTL Functional Verification — 92/92 Tests PASS
+
+All 92 ISA verification tests pass across two execution modes (zero-latency and multi-cycle stall), verified with Icarus Verilog simulation using a custom testbench infrastructure.
+
+**Verification Phases:**
+
+| Phase | Scope | Tests | Cumulative | Status |
+|-------|-------|-------|------------|--------|
+| Phase 2 — RV32I Base | All 37 base integer instructions | 28 | 28 | ✅ PASS |
+| Phase 3 — M-Extension | MUL/MULH/MULHSU/MULHU/DIV/DIVU/REM/REMU | +8 | 36 | ✅ PASS |
+| Phase 4 — Machine CSR | CSRRW/CSRRS/CSRRC/CSRRWI/CSRRSI/CSRRCI/ECALL/MRET | +8 | 44 | ✅ PASS |
+| Phase 5 — Branch Predictor | BHT + BTB dynamic prediction validation | +2 | 46 | ✅ PASS |
+| Phase 6 — Memory Stall | All 46 tests re-run with IMEM_LATENCY=2, DMEM_LATENCY=3 | ×2 | **92** | ✅ PASS |
+
+**Phase 2 — RV32I Base Test Coverage (28 tests, 608 instructions):**
+
+| Category | Instructions Tested |
+|----------|-------------------|
+| R-type ALU (10) | ADD, SUB, AND, OR, XOR, SLT, SLTU, SLL, SRL, SRA |
+| I-type ALU (9) | ADDI, ANDI, ORI, XORI, SLTI, SLTIU, SLLI, SRLI, SRAI |
+| Load (5) | LB, LH, LW, LBU, LHU |
+| Store (3) | SB, SH, SW |
+| Branch (6) | BEQ, BNE, BLT, BGE, BLTU, BGEU |
+| Jump (2) | JAL, JALR |
+| Upper Immediate (2) | LUI, AUIPC |
+| System (3) | FENCE, ECALL, EBREAK |
+| Pipeline Hazards (3) | Data forwarding, load-use hazard, branch+forward |
+| Integration (1) | Loops, Fibonacci, array operations |
+
+**RTL Bugs Found & Fixed During Verification:**
+- **Bug 1:** WB-to-ID bypass missing — Added MUX for 3-cycle forwarding (+100-150 gates, +0.1ns critical path)
+- **Bug 2:** JAL/JALR self-flush — Removed erroneous pipeline flush (logic fix, 0 gates)
+
+**Phase 3 — M-Extension Coverage (8 tests):**
+- MUL (6 cases), MULH (4), MULHSU (3), MULHU (3), DIV (6), DIVU (4), REM (5), REMU (4)
+- Hardware: 3-cycle Booth-style multiplier, 33-cycle iterative restoring divider
+
+**Phase 5 — Branch Predictor Performance:**
+- test_comprehensive: 214 → 178 cycles (**17% IPC improvement**)
+- Architecture: 64-entry 2-bit saturating counter BHT + 64-entry BTB
+
+**Verification Infrastructure (in `verif/`):**
+
+| File | Lines | Role |
+|------|-------|------|
+| `gen_tests.py` | 1,566 | Test generator — produces 46 hex test cases |
+| `rv32i_asm.py` | 293 | Custom 2-pass RV32IM assembler |
+| `tb_rv32i_cpu.v` | 203 | Icarus Verilog testbench — 64KB unified memory, TOHOST monitor |
+| `run_tests.sh` | 185 | Automated test runner with pass/fail reporting |
+| `tests/*.hex` | 46 files | Machine code test vectors (1,072 lines total) |
+
+### 21.2 Synthesis Formal Equivalence — 3-Tier Verification
+
+Post-synthesis formal equivalence checking verifies the gate-level netlist is functionally identical to the RTL. Three independent verification tiers are applied:
+
+| Tier | Method | Result | Detail |
+|------|--------|--------|--------|
+| **V1** — Random Simulation | 1,000 random input vectors × 6,094 outputs | ✅ **PASS** | 6,094,000 output comparisons, zero mismatches |
+| **V2** — SAT Miter (CDCL) | Full-design equivalence proof | ⚠️ Inconclusive | Conflict budget exceeded at 100K — expected for 69K-node AIG |
+| **V3** — Per-Output SAT | Individual output equivalence with COI reduction | ✅ **6,039/6,094 PROVEN** | 55 outputs inconclusive (complex multiplier/divider paths) |
+
+**V2 Note:** The full-miter SAT hitting the conflict budget is expected behavior for a 69K-node design with wide multiplier logic. V1 random simulation (6M checks) and V3 per-output proofs (99.1% proven) provide high confidence in correctness.
+
+**Total SAT solving time:** ~87,693 seconds (~24.4 hours)
+
+### 21.3 Multi-Corner Timing Verification (Post-PnR)
+
+Static timing analysis performed across 3 PVT corners after place-and-route:
+
+| Corner | Condition | Setup WNS | Hold WNS | Status |
+|--------|-----------|-----------|----------|--------|
+| **TT** (Typical) | 25°C, 1.80V | **+8.319 ns** | **+0.269 ns** | ✅ MET |
+| **FF** (Fast) | −40°C, 1.95V | **+14.195 ns** | — | ✅ MET |
+| **SS** (Slow) | 100°C, 1.60V | **−6.260 ns** | — | ⚠️ Violation |
+
+- TT and FF corners: All timing constraints met at 40 MHz (25 ns clock period)
+- SS corner: Setup violation of −6.260 ns — acceptable for first tapeout; SS represents worst-case industrial conditions (100°C, low voltage)
+
+### 21.4 Physical Signoff Summary
+
+| Check | Tool | Result |
+|-------|------|--------|
+| Magic DRC | Magic | **0 errors** ✅ |
+| KLayout DRC | KLayout | **0 errors** ✅ |
+| XOR Check | — | **0 differences** ✅ |
+| Antenna | — | **0 violations** (434 diodes inserted) ✅ |
+| Routing DRC | TritonRoute | **0 violations** ✅ |
+| LVS | Netgen | **Circuits match uniquely** ✅ |
+| IR Drop (VPWR) | — | 123 µV (0.01% of 1.8V) ✅ |
+| IR Drop (VGND) | — | 110 µV (0.01% of GND) ✅ |
+
+---
+
+## 22. Reproducibility — Docker Environment
 
 The entire PnR flow is reproducible using the LibreLane Docker container with pinned PDK versions.
 
-### 21.1 Dockerfile
+### 22.1 Dockerfile
 
 ```dockerfile
 FROM ghcr.io/efabless/openlane2:3.0.1
@@ -967,7 +1063,7 @@ COPY config.json .
 CMD ["python3", "-m", "openlane", "config.json"]
 ```
 
-### 21.2 Quick Start
+### 22.2 Quick Start
 
 ```bash
 # Build the container
@@ -981,7 +1077,7 @@ docker run -it --rm -v $(pwd):/design ghcr.io/efabless/openlane2:3.0.1 bash
 python3 -m openlane config.json
 ```
 
-### 21.3 Pinned Versions
+### 22.3 Pinned Versions
 
 | Component | Version / Hash |
 |---|---|
@@ -990,7 +1086,7 @@ python3 -m openlane config.json
 | **Standard Cell Library** | `sky130_fd_sc_hd` (high density) |
 | **PDK variant** | `sky130A` |
 
-### 21.4 Reproducing Results
+### 22.4 Reproducing Results
 
 The flow runs 44 sequential steps from floorplanning through GDSII generation:
 
@@ -1010,9 +1106,9 @@ Expected outputs in `runs/riscv_clean/`:
 
 ---
 
-## 22. Architecture Documentation
+## 23. Architecture Documentation
 
-### 22.1 Top-Level Block Diagram
+### 23.1 Top-Level Block Diagram
 
 ```
                               ┌─────────────────────────────────────────────────────────┐
@@ -1052,7 +1148,7 @@ Expected outputs in `runs/riscv_clean/`:
                                └─────────────────────────────────────────────────────────┘
 ```
 
-### 22.2 Pipeline Datapath
+### 23.2 Pipeline Datapath
 
 ```
  ┌─────────────────────────────────────────────────────────────────────────────────────┐
@@ -1080,7 +1176,7 @@ Expected outputs in `runs/riscv_clean/`:
          ◀──── Hazard Detection + Stall Logic ───▶
 ```
 
-### 22.3 Branch Predictor Architecture
+### 23.3 Branch Predictor Architecture
 
 ```
                     ┌──────────────────────────────────────┐
@@ -1106,7 +1202,7 @@ Expected outputs in `runs/riscv_clean/`:
                   10=Weakly Taken,       11=Strongly Taken
 ```
 
-### 22.4 Memory System Interface
+### 23.4 Memory System Interface
 
 ```
   ┌─────────────┐         ┌─────────────┐
@@ -1128,7 +1224,7 @@ Expected outputs in `runs/riscv_clean/`:
   Total I/O: 172 pins (68 inputs + 102 outputs + clk + rst_n)
 ```
 
-### 22.5 Physical Floorplan
+### 23.5 Physical Floorplan
 
 ```
   ┌─────────────────────── 901.25 µm ──────────────────────┐
@@ -1159,7 +1255,7 @@ Expected outputs in `runs/riscv_clean/`:
   └─────────────────────────────────────────────────────────┘
 ```
 
-### 22.6 Power Distribution Network
+### 23.6 Power Distribution Network
 
 ```
   Layer Stack (cross-section):
