@@ -1,7 +1,6 @@
-// tb_rv32i_cpu.v — RV32I ISA Compliance Testbench
+// tb_rv32i_cpu.v — RV32IMAC 8-Stage CPU Testbench
 // Instantiates rv32i_cpu with unified word-addressable memory.
 // Loads test program via $readmemh, monitors TOHOST for pass/fail.
-// Usage: iverilog -o sim -DTEST_HEX=\"test.hex\" tb_rv32i_cpu.v ../src/rv32i_cpu.v && ./sim
 
 `timescale 1ns / 1ps
 
@@ -11,15 +10,23 @@ module tb_rv32i_cpu;
     reg clk;
     reg rst_n;
 
-    // CPU ↔ memory wires
+    // CPU <-> memory wires
     wire [31:0] imem_addr, dmem_addr, dmem_wdata, imem_rdata, dmem_rdata;
     wire  [3:0] dmem_wstrb;
     wire        imem_req, dmem_req, imem_ready, dmem_ready;
+    wire        dmem_lock;
+
+    // New ports — directly accessible as wires
+    wire        fence_i;
+    wire        cpu_active;
+    wire  [2:0] cpu_power_state;
+    wire        debug_halted, debug_running;
+    wire [31:0] debug_pc, debug_gpr_rdata;
 
     // Unified memory — 64KB (16K x 32-bit words)
     reg [31:0] mem [0:16383];
 
-    // TOHOST address: 0x1000 → word index 0x400
+    // TOHOST address: 0x1000 -> word index 0x400
     localparam TOHOST_WORD = 14'h400;
 
     // Clock: 10ns period (100 MHz)
@@ -27,8 +34,6 @@ module tb_rv32i_cpu;
     always #5 clk = ~clk;
 
     // Instruction memory — configurable latency
-    // IMEM_LATENCY=0: combinational (always ready)
-    // IMEM_LATENCY=N: N-cycle wait after request
 `ifdef IMEM_LATENCY
     reg [3:0] imem_wait_cnt;
     reg       imem_ready_r;
@@ -75,7 +80,6 @@ module tb_rv32i_cpu;
             dmem_wait_cnt <= 0;
         end
     end
-    // Data memory — write on ready
     always @(posedge clk) begin
         if (dmem_req && dmem_ready_r && |dmem_wstrb) begin
             if (dmem_wstrb[0]) mem[dmem_addr[15:2]][ 7: 0] <= dmem_wdata[ 7: 0];
@@ -87,8 +91,6 @@ module tb_rv32i_cpu;
 `else
     assign dmem_rdata = mem[dmem_addr[15:2]];
     assign dmem_ready = 1'b1;
-
-    // Data memory — write: byte-level via dmem_wstrb
     always @(posedge clk) begin
         if (dmem_req && |dmem_wstrb) begin
             if (dmem_wstrb[0]) mem[dmem_addr[15:2]][ 7: 0] <= dmem_wdata[ 7: 0];
@@ -99,22 +101,60 @@ module tb_rv32i_cpu;
     end
 `endif
 
-    // DUT instantiation
+    // Timer interrupt for WFI testing
+    reg timer_irq_r;
+    initial timer_irq_r = 0;
+`ifdef WFI_TIMER_CYCLES
+    initial begin
+        repeat(`WFI_TIMER_CYCLES) @(posedge clk);
+        timer_irq_r = 1;
+        repeat(10) @(posedge clk);
+        timer_irq_r = 0;
+    end
+`endif
+
+    // DUT instantiation — 8-stage RV32IMAC CPU
     rv32i_cpu #(
-        .RESET_ADDR(32'h0000_0000)
+        .RESET_ADDR(32'h0000_0000),
+        .HART_ID(0),
+        .NMI_ADDR(32'h0000_0004)
     ) dut (
-        .clk        (clk),
-        .rst_n      (rst_n),
-        .imem_addr  (imem_addr),
-        .imem_req   (imem_req),
-        .imem_rdata (imem_rdata),
-        .imem_ready (imem_ready),
-        .dmem_addr  (dmem_addr),
-        .dmem_wdata (dmem_wdata),
-        .dmem_wstrb (dmem_wstrb),
-        .dmem_req   (dmem_req),
-        .dmem_rdata (dmem_rdata),
-        .dmem_ready (dmem_ready)
+        .clk            (clk),
+        .rst_n          (rst_n),
+        // Instruction memory
+        .imem_addr      (imem_addr),
+        .imem_req       (imem_req),
+        .imem_rdata     (imem_rdata),
+        .imem_ready     (imem_ready),
+        .imem_error     (1'b0),
+        // Data memory
+        .dmem_addr      (dmem_addr),
+        .dmem_wdata     (dmem_wdata),
+        .dmem_wstrb     (dmem_wstrb),
+        .dmem_req       (dmem_req),
+        .dmem_lock      (dmem_lock),
+        .dmem_rdata     (dmem_rdata),
+        .dmem_ready     (dmem_ready),
+        .dmem_error     (1'b0),
+        // Interrupts — all inactive for ISA tests
+        .ext_irq        (1'b0),
+        .timer_irq      (timer_irq_r),
+        .soft_irq       (1'b0),
+        .nmi            (1'b0),
+        // Debug — inactive
+        .debug_halt     (1'b0),
+        .debug_resume   (1'b0),
+        .debug_halted   (debug_halted),
+        .debug_running  (debug_running),
+        .debug_pc       (debug_pc),
+        .debug_gpr_addr (5'd0),
+        .debug_gpr_wdata(32'd0),
+        .debug_gpr_rdata(debug_gpr_rdata),
+        .debug_gpr_wr   (1'b0),
+        // Control outputs
+        .fence_i        (fence_i),
+        .cpu_active     (cpu_active),
+        .cpu_power_state(cpu_power_state)
     );
 
     // Cycle counter
@@ -125,7 +165,7 @@ module tb_rv32i_cpu;
     reg test_pass;
     reg [31:0] tohost_val;
 
-    // VCD dump for waveform viewing
+    // VCD dump
     initial begin
         $dumpfile("dump.vcd");
         $dumpvars(0, tb_rv32i_cpu);
@@ -149,16 +189,13 @@ module tb_rv32i_cpu;
         cycle_count = 0;
         tohost_val = 0;
 
-        // Hold reset for 5 cycles
         repeat (5) @(posedge clk);
         rst_n = 1;
 
-        // Run until TOHOST write or timeout
-        while (!test_done && cycle_count < 50000) begin
+        while (!test_done && cycle_count < 100000) begin
             @(posedge clk);
             cycle_count = cycle_count + 1;
 
-            // Detect write to TOHOST (0x1000)
             if (dmem_req && |dmem_wstrb && dmem_addr[15:2] == TOHOST_WORD) begin
                 tohost_val = 0;
                 if (dmem_wstrb[0]) tohost_val[ 7: 0] = dmem_wdata[ 7: 0];
@@ -170,7 +207,6 @@ module tb_rv32i_cpu;
             end
         end
 
-        // Report result
         if (!test_done) begin
             $display("TIMEOUT after %0d cycles", cycle_count);
             dump_regs();
@@ -194,7 +230,6 @@ module tb_rv32i_cpu;
                 $display("  x%-2d = 0x%08h", i, dut.regfile[i]);
             $display("--- Pipeline State ---");
             $display("  PC          = 0x%08h", dut.pc);
-            $display("  IF/ID instr = 0x%08h", dut.ifid_instr);
             $display("  imem_addr   = 0x%08h", imem_addr);
             $display("  dmem_addr   = 0x%08h", dmem_addr);
         end

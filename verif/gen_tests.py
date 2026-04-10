@@ -1475,6 +1475,891 @@ def gen_test_bp_mispredict():
     p.FAIL(99)
     return write_test('test_bp_mispredict', p)
 
+
+
+# ============================================================================
+# R12B NEW TESTS: RV32A Atomic Instructions
+# ============================================================================
+
+def gen_test_lr_sc():
+    """LR.W / SC.W basic success and failure paths."""
+    p = Program()
+    DATA_ADDR = 0x2000
+    # Store initial value 42 at DATA_ADDR
+    p.LI('x5', DATA_ADDR)
+    p.ADDI('x6', 'x0', 42)
+    p.SW('x6', 0, 'x5')
+
+    # Test 1: LR/SC to same address — should succeed (rd=0)
+    p.LR_W('x10', 'x5')          # x10 = mem[DATA_ADDR] = 42
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')   # check LR read correct value
+    p.ADDI('x6', 'x0', 99)
+    p.SC_W('x11', 'x5', 'x6')    # SC: write 99, x11 = 0 on success
+    p.BNE('x11', 'x0', 'fail')   # x11 must be 0
+
+    # Verify the store happened
+    p.LW('x12', 0, 'x5')
+    p.ADDI('x7', 'x0', 99)
+    p.BNE('x12', 'x7', 'fail')
+
+    # Test 2: SC without prior LR — should fail (rd=1)
+    p.ADDI('x6', 'x0', 55)
+    p.SC_W('x13', 'x5', 'x6')    # No prior LR → fail
+    p.ADDI('x7', 'x0', 1)
+    p.BNE('x13', 'x7', 'fail')   # x13 must be 1
+
+    # Verify store did NOT happen (value still 99)
+    p.LW('x14', 0, 'x5')
+    p.ADDI('x7', 'x0', 99)
+    p.BNE('x14', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_lr_sc', p)
+
+
+def gen_test_amoswap():
+    """AMOSWAP.W — swap memory with register, return old value."""
+    p = Program()
+    DATA_ADDR = 0x2000
+    p.LI('x5', DATA_ADDR)
+    p.ADDI('x6', 'x0', 100)
+    p.SW('x6', 0, 'x5')           # mem = 100
+
+    p.ADDI('x7', 'x0', 200)
+    p.AMOSWAP_W('x10', 'x7', 'x5')  # x10 = old(100), mem = 200
+    p.ADDI('x8', 'x0', 100)
+    p.BNE('x10', 'x8', 'fail')    # x10 should be 100
+
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 200)
+    p.BNE('x11', 'x8', 'fail')    # mem should be 200
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_amoswap', p)
+
+
+def gen_test_amoadd():
+    """AMOADD.W — atomic add, return old value."""
+    p = Program()
+    DATA_ADDR = 0x2000
+    p.LI('x5', DATA_ADDR)
+    p.ADDI('x6', 'x0', 50)
+    p.SW('x6', 0, 'x5')           # mem = 50
+
+    p.ADDI('x7', 'x0', 30)
+    p.AMOADD_W('x10', 'x7', 'x5')  # x10 = old(50), mem = 50+30=80
+    p.ADDI('x8', 'x0', 50)
+    p.BNE('x10', 'x8', 'fail')
+
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 80)
+    p.BNE('x11', 'x8', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_amoadd', p)
+
+
+def gen_test_amo_logic():
+    """AMOAND, AMOOR, AMOXOR — bitwise atomic operations."""
+    p = Program()
+    DATA_ADDR = 0x2000
+    p.LI('x5', DATA_ADDR)
+
+    # Test AMOAND: mem=0xFF, AND with 0x0F → 0x0F
+    p.ADDI('x6', 'x0', 0xFF)
+    p.SW('x6', 0, 'x5')
+    p.ADDI('x7', 'x0', 0x0F)
+    p.AMOAND_W('x10', 'x7', 'x5')  # x10=0xFF, mem=0x0F
+    p.ADDI('x8', 'x0', 0xFF)
+    p.BNE('x10', 'x8', 'fail')
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 0x0F)
+    p.BNE('x11', 'x8', 'fail')
+
+    # Test AMOOR: mem=0x0F, OR with 0xF0 → 0xFF
+    p.ADDI('x7', 'x0', 0xF0)
+    p.AMOOR_W('x10', 'x7', 'x5')  # x10=0x0F, mem=0xFF
+    p.ADDI('x8', 'x0', 0x0F)
+    p.BNE('x10', 'x8', 'fail')
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 0xFF)
+    p.BNE('x11', 'x8', 'fail')
+
+    # Test AMOXOR: mem=0xFF, XOR with 0x0F → 0xF0
+    p.ADDI('x7', 'x0', 0x0F)
+    p.AMOXOR_W('x10', 'x7', 'x5')  # x10=0xFF, mem=0xF0
+    p.ADDI('x8', 'x0', 0xFF)
+    p.BNE('x10', 'x8', 'fail')
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 0xF0)
+    p.BNE('x11', 'x8', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_amo_logic', p)
+
+
+def gen_test_amo_minmax():
+    """AMOMIN, AMOMAX, AMOMINU, AMOMAXU — signed/unsigned min/max."""
+    p = Program()
+    DATA_ADDR = 0x2000
+    p.LI('x5', DATA_ADDR)
+
+    # AMOMIN (signed): mem=10, min(10, 5) → 5
+    p.ADDI('x6', 'x0', 10)
+    p.SW('x6', 0, 'x5')
+    p.ADDI('x7', 'x0', 5)
+    p.AMOMIN_W('x10', 'x7', 'x5')  # x10=10, mem=5
+    p.ADDI('x8', 'x0', 10)
+    p.BNE('x10', 'x8', 'fail')
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 5)
+    p.BNE('x11', 'x8', 'fail')
+
+    # AMOMAX (signed): mem=5, max(5, 20) → 20
+    p.ADDI('x7', 'x0', 20)
+    p.AMOMAX_W('x10', 'x7', 'x5')  # x10=5, mem=20
+    p.ADDI('x8', 'x0', 5)
+    p.BNE('x10', 'x8', 'fail')
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 20)
+    p.BNE('x11', 'x8', 'fail')
+
+    # AMOMINU (unsigned): mem=20, minu(20, 3) → 3
+    p.ADDI('x7', 'x0', 3)
+    p.AMOMINU_W('x10', 'x7', 'x5')  # x10=20, mem=3
+    p.ADDI('x8', 'x0', 20)
+    p.BNE('x10', 'x8', 'fail')
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 3)
+    p.BNE('x11', 'x8', 'fail')
+
+    # AMOMAXU (unsigned): mem=3, maxu(3, 100) → 100
+    p.ADDI('x7', 'x0', 100)
+    p.AMOMAXU_W('x10', 'x7', 'x5')  # x10=3, mem=100
+    p.ADDI('x8', 'x0', 3)
+    p.BNE('x10', 'x8', 'fail')
+    p.LW('x11', 0, 'x5')
+    p.ADDI('x8', 'x0', 100)
+    p.BNE('x11', 'x8', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_amo_minmax', p)
+
+
+# ============================================================================
+# R12B NEW TESTS: Illegal Instruction & Misaligned Access
+# ============================================================================
+
+def gen_test_illegal_instr():
+    """Illegal instruction should trap to mtvec with mcause=2."""
+    CSR_MTVEC  = 0x305
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.CSRRS('x11', CSR_MEPC, 'x0')
+    p.ADDI('x11', 'x11', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x11')
+    p.MRET()
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Emit illegal instruction (all zeros = illegal in RV32)
+    p.RAW(0x0000006B)  # opcode=1101011 (unassigned), 32-bit illegal instruction
+
+    # If we reach here, trap handler returned
+    p.ADDI('x7', 'x0', 2)       # EXC_ILLEGAL_INSTR = 2
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_illegal_instr', p)
+
+
+def gen_test_misalign_load():
+    """Misaligned LW should trap with mcause=4 (load addr misalign)."""
+    CSR_MTVEC  = 0x305
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    CSR_MTVAL  = 0x343
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.CSRRS('x12', CSR_MTVAL, 'x0')
+    p.CSRRS('x11', CSR_MEPC, 'x0')
+    p.ADDI('x11', 'x11', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x11')
+    p.MRET()
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # LW from misaligned address (0x2001)
+    p.LI('x6', 0x2001)
+    p.LW('x9', 0, 'x6')
+
+    # Verify mcause = 4 (load address misaligned)
+    p.ADDI('x7', 'x0', 4)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_misalign_load', p)
+
+
+def gen_test_misalign_store():
+    """Misaligned SW should trap with mcause=6 (store addr misalign)."""
+    CSR_MTVEC  = 0x305
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.CSRRS('x11', CSR_MEPC, 'x0')
+    p.ADDI('x11', 'x11', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x11')
+    p.MRET()
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # SW to misaligned address (0x2003)
+    p.LI('x6', 0x2003)
+    p.ADDI('x9', 'x0', 42)
+    p.SW('x9', 0, 'x6')
+
+    # Verify mcause = 6 (store address misaligned)
+    p.ADDI('x7', 'x0', 6)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_misalign_store', p)
+
+
+# ============================================================================
+# R12B NEW TESTS: Pipeline Stress
+# ============================================================================
+
+def gen_test_back_to_back_jal():
+    """Rapid JAL/JALR sequences stress the pipeline flush logic."""
+    p = Program()
+
+    # Chain: JAL → target1 → JAL → target2 → JAL → target3
+    p.JAL('x1', 'target1')
+    p.J('fail')
+    p.label('target1')
+    p.JAL('x2', 'target2')
+    p.J('fail')
+    p.label('target2')
+    p.JAL('x3', 'target3')
+    p.J('fail')
+    p.label('target3')
+
+    # Verify all link registers
+    p.ADDI('x7', 'x0', 4)
+    p.BNE('x1', 'x7', 'fail')      # x1 = 0x04 (JAL at 0x00 → PC+4)
+
+    # JALR chain: x1→x2→x3 are set from above. Use JALR to jump back.
+    p.AUIPC('x5', 0)
+    p.ADDI('x5', 'x5', 16)      # skip AUIPC(4)+ADDI(4)+JALR(4)+J(4) = 16
+    p.JALR('x4', 'x5', 0)
+    p.J('fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_back_to_back_jal', p)
+
+
+def gen_test_csr_write_read():
+    """CSR write immediately followed by CSR read — tests CSR forwarding."""
+    CSR_MSCRATCH = 0x340
+    p = Program()
+
+    # Write then immediately read mscratch
+    p.ADDI('x6', 'x0', 123)
+    p.CSRRW('x0', CSR_MSCRATCH, 'x6')  # write 123
+    p.CSRRS('x10', CSR_MSCRATCH, 'x0') # read back
+    p.ADDI('x7', 'x0', 123)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Write new value and read in same instruction (CSRRW swaps)
+    p.ADDI('x6', 'x0', 77)
+    p.CSRRW('x11', CSR_MSCRATCH, 'x6') # x11 = old(123), write 77
+    p.ADDI('x7', 'x0', 123)
+    p.BNE('x11', 'x7', 'fail')
+
+    # Verify new value
+    p.CSRRS('x12', CSR_MSCRATCH, 'x0')
+    p.ADDI('x7', 'x0', 77)
+    p.BNE('x12', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_csr_write_read', p)
+
+
+def gen_test_div_use():
+    """DIV result used immediately — tests div stall correctness."""
+    p = Program()
+    p.ADDI('x1', 'x0', 100)
+    p.ADDI('x2', 'x0', 10)
+    p.DIV('x3', 'x1', 'x2')     # x3 = 10 (takes many cycles)
+    p.ADDI('x4', 'x3', 5)       # immediately use div result: x4 = 15
+    p.ADDI('x7', 'x0', 15)
+    p.BNE('x4', 'x7', 'fail')
+
+    # DIV then branch on result
+    p.ADDI('x1', 'x0', 42)
+    p.ADDI('x2', 'x0', 6)
+    p.DIV('x3', 'x1', 'x2')     # x3 = 7
+    p.ADDI('x7', 'x0', 7)
+    p.BEQ('x3', 'x7', 'div_ok')
+    p.J('fail')
+    p.label('div_ok')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_div_use', p)
+
+
+def gen_test_load_branch():
+    """Load immediately followed by branch on loaded value."""
+    p = Program()
+    DATA_ADDR = 0x2000
+    p.LI('x5', DATA_ADDR)
+
+    # Store known values
+    p.ADDI('x6', 'x0', 42)
+    p.SW('x6', 0, 'x5')
+    p.ADDI('x6', 'x0', 0)
+    p.SW('x6', 4, 'x5')
+
+    # Load then branch on result (load-use + branch hazard)
+    p.LW('x10', 0, 'x5')        # x10 = 42
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')  # branch based on loaded value
+
+    # Load zero then branch
+    p.LW('x11', 4, 'x5')        # x11 = 0
+    p.BEQ('x11', 'x0', 'load_ok')
+    p.J('fail')
+    p.label('load_ok')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_load_branch', p)
+
+
+def gen_test_misa_readonly():
+    """Test that MISA reads the correct value (RV32IMAC) and is read-only."""
+    CSR_MISA = 0x301
+    p = Program()
+    # Read MISA
+    p.CSRRS('x10', CSR_MISA, 'x0')
+
+    # MISA for RV32IMAC: bit[0]=A, bit[2]=C, bit[8]=I, bit[12]=M, MXL=01 (bit[31:30])
+    # = 0x40001105
+    p.LI('x7', 0x40001105)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Try to write MISA (should be ignored — WARL, fixed)
+    p.LI('x6', 0x40001104)       # try to clear A bit
+    p.CSRRW('x0', CSR_MISA, 'x6')
+    p.CSRRS('x11', CSR_MISA, 'x0')
+    p.BNE('x11', 'x7', 'fail')  # should still be 0x40001105
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_misa_readonly', p)
+
+
+def gen_test_mvendorid():
+    """Test machine identity CSRs (read-only, implementation-defined)."""
+    CSR_MVENDORID = 0xF11
+    CSR_MARCHID   = 0xF12
+    CSR_MIMPID    = 0xF13
+    CSR_MHARTID   = 0xF14
+    p = Program()
+
+    # These should all read without trapping — exact values are impl-defined
+    p.CSRRS('x10', CSR_MVENDORID, 'x0')
+    p.CSRRS('x11', CSR_MARCHID, 'x0')
+    p.CSRRS('x12', CSR_MIMPID, 'x0')
+    p.CSRRS('x13', CSR_MHARTID, 'x0')
+
+    # mhartid should be 0 for single-hart
+    p.BNE('x13', 'x0', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_mvendorid', p)
+
+
+def gen_test_exception_priority():
+    """Test that exceptions have correct priority ordering."""
+    CSR_MTVEC  = 0x305
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    p = Program()
+
+    # Setup trap handler
+    p.JAL('x0', 'skip_handler')
+    p.label('trap_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.CSRRS('x11', CSR_MEPC, 'x0')
+    p.ADDI('x11', 'x11', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x11')
+    p.MRET()
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Test: ECALL (mcause=11), then verify we can resume
+    p.ECALL()
+    p.ADDI('x7', 'x0', 11)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test: EBREAK (mcause=3)
+    p.EBREAK()
+    p.ADDI('x7', 'x0', 3)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Both traps handled and returned correctly
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_exception_priority', p)
+
+
+def gen_test_store_load_forwarding():
+    """Store then load from same address — pipeline must handle correctly."""
+    p = Program()
+    DATA_ADDR = 0x2000
+    p.LI('x5', DATA_ADDR)
+
+    # SW then immediately LW from same address
+    p.ADDI('x6', 'x0', 77)
+    p.SW('x6', 0, 'x5')
+    p.LW('x10', 0, 'x5')
+    p.ADDI('x7', 'x0', 77)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Different offsets
+    p.ADDI('x6', 'x0', 88)
+    p.SW('x6', 4, 'x5')
+    p.ADDI('x6', 'x0', 99)
+    p.SW('x6', 8, 'x5')
+    p.LW('x11', 4, 'x5')
+    p.LW('x12', 8, 'x5')
+    p.ADDI('x7', 'x0', 88)
+    p.BNE('x11', 'x7', 'fail')
+    p.ADDI('x7', 'x0', 99)
+    p.BNE('x12', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_store_load_fwd', p)
+
+
+# ============================================================================
+# RV32C COMPRESSED INSTRUCTION TESTS
+# ============================================================================
+
+def gen_test_c_arith():
+    """Compressed arithmetic: C.LI, C.ADDI, C.LUI, C.MV, C.ADD, C.NOP,
+    C.SLLI, C.SRLI, C.SRAI, C.ANDI, C.SUB/XOR/OR/AND, C.ADDI16SP, C.ADDI4SPN."""
+    p = Program()
+
+    # Test 1: C.LI positive
+    p.C_LI('x10', 10)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 10)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 2: C.LI negative (-3)
+    p.C_LI('x10', -3)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', -3)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 3: C.ADDI positive
+    p.C_LI('x10', 10)
+    p.C_ADDI('x10', 5)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 15)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 4: C.ADDI negative
+    p.C_LI('x10', 10)
+    p.C_ADDI('x10', -3)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 7)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 5: C.LUI
+    p.C_LUI('x10', 2)
+    p.ALIGN4()
+    p.LI('x7', 0x2000)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 6: C.MV
+    p.ADDI('x1', 'x0', 42)
+    p.C_MV('x10', 'x1')
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 7: C.ADD
+    p.ADDI('x10', 'x0', 20)
+    p.ADDI('x1', 'x0', 30)
+    p.C_ADD('x10', 'x1')
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 50)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 8: C.NOP (should not change any register)
+    p.ADDI('x10', 'x0', 77)
+    p.C_NOP()
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 77)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 9: C.SLLI
+    p.ADDI('x10', 'x0', 1)
+    p.C_SLLI('x10', 4)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 16)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 10: C.SRLI (uses compressed registers x8-x15)
+    p.ADDI('x8', 'x0', 64)
+    p.C_SRLI('x8', 2)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 16)
+    p.BNE('x8', 'x7', 'fail')
+
+    # Test 11: C.SRAI (arithmetic right shift, preserves sign)
+    p.ADDI('x8', 'x0', -16)
+    p.C_SRAI('x8', 2)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', -4)
+    p.BNE('x8', 'x7', 'fail')
+
+    # Test 12: C.ANDI
+    p.ADDI('x8', 'x0', 0xFF)
+    p.C_ANDI('x8', 0x0F)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 0x0F)
+    p.BNE('x8', 'x7', 'fail')
+
+    # Test 13: C.SUB
+    p.ADDI('x8', 'x0', 30)
+    p.ADDI('x9', 'x0', 10)
+    p.C_SUB('x8', 'x9')
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 20)
+    p.BNE('x8', 'x7', 'fail')
+
+    # Test 14: C.XOR
+    p.ADDI('x8', 'x0', 0xFF)
+    p.ADDI('x9', 'x0', 0x0F)
+    p.C_XOR('x8', 'x9')
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 0xF0)
+    p.BNE('x8', 'x7', 'fail')
+
+    # Test 15: C.OR
+    p.ADDI('x8', 'x0', 0xF0)
+    p.ADDI('x9', 'x0', 0x0F)
+    p.C_OR('x8', 'x9')
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 0xFF)
+    p.BNE('x8', 'x7', 'fail')
+
+    # Test 16: C.AND
+    p.ADDI('x8', 'x0', 0xFF)
+    p.ADDI('x9', 'x0', 0x0F)
+    p.C_AND('x8', 'x9')
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 0x0F)
+    p.BNE('x8', 'x7', 'fail')
+
+    # Test 17: C.ADDI16SP (adds multiple of 16 to sp)
+    p.ADDI('x2', 'x0', 100)
+    p.C_ADDI16SP(32)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 132)
+    p.BNE('x2', 'x7', 'fail')
+
+    # Test 18: C.ADDI4SPN (rd' = sp + nzuimm)
+    p.ADDI('x2', 'x0', 200)
+    p.C_ADDI4SPN('x8', 16)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 216)
+    p.BNE('x8', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_c_arith', p)
+
+
+def gen_test_c_branch_jump():
+    """Compressed branches and jumps: C.J, C.JAL, C.BEQZ, C.BNEZ, C.JR, C.JALR."""
+    p = Program()
+
+    # Test 1: C.J — unconditional forward jump
+    p.ALIGN4()
+    p.C_J('cj_target')
+    p.ALIGN4()
+    p.J('fail')
+    p.label('cj_target')
+
+    # Test 2: C.JAL — jump and link (RV32 only, sets x1)
+    p.ALIGN4()
+    p.C_JAL('cjal_target')
+    p.ALIGN4()
+    p.J('fail')
+    p.label('cjal_target')
+    p.BEQ('x1', 'x0', 'fail')
+
+    # Test 3: C.BEQZ — taken (rs1' == 0)
+    p.ADDI('x8', 'x0', 0)
+    p.ALIGN4()
+    p.C_BEQZ('x8', 'beqz_taken')
+    p.ALIGN4()
+    p.J('fail')
+    p.label('beqz_taken')
+
+    # Test 4: C.BEQZ — not taken (rs1' != 0)
+    p.ADDI('x8', 'x0', 1)
+    p.ALIGN4()
+    p.C_BEQZ('x8', 'beqz_fail')
+    p.ALIGN4()
+    p.JAL('x0', 'beqz_ok')
+    p.label('beqz_fail')
+    p.J('fail')
+    p.label('beqz_ok')
+
+    # Test 5: C.BNEZ — taken (rs1' != 0)
+    p.ADDI('x8', 'x0', 5)
+    p.ALIGN4()
+    p.C_BNEZ('x8', 'bnez_taken')
+    p.ALIGN4()
+    p.J('fail')
+    p.label('bnez_taken')
+
+    # Test 6: C.BNEZ — not taken (rs1' == 0)
+    p.ADDI('x8', 'x0', 0)
+    p.ALIGN4()
+    p.C_BNEZ('x8', 'bnez_fail')
+    p.ALIGN4()
+    p.JAL('x0', 'bnez_ok')
+    p.label('bnez_fail')
+    p.J('fail')
+    p.label('bnez_ok')
+
+    # Test 7: C.JR — jump via register
+    p.JAL('x10', 'jr_helper')
+    p.label('jr_dest')
+    p.JAL('x0', 'jr_done')
+    p.label('jr_helper')
+    p.ALIGN4()
+    p.C_JR('x10')
+    p.ALIGN4()
+    p.J('fail')
+    p.label('jr_done')
+
+    # Test 8: C.JALR — jump and link via register
+    p.JAL('x10', 'jalr_helper')
+    p.label('jalr_dest')
+    p.BEQ('x1', 'x0', 'fail')
+    p.JAL('x0', 'jalr_done')
+    p.label('jalr_helper')
+    p.ALIGN4()
+    p.C_JALR('x10')
+    p.ALIGN4()
+    p.J('fail')
+    p.label('jalr_done')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_c_branch_jump', p)
+
+
+def gen_test_c_load_store():
+    """Compressed loads/stores: C.LW, C.SW, C.LWSP, C.SWSP."""
+    p = Program()
+    DATA_ADDR = 0x2000
+
+    # Setup sp and base register
+    p.LI('x2', DATA_ADDR)
+    p.LI('x8', DATA_ADDR)
+
+    # Test 1: C.SW + C.LW (compressed registers, offset 0)
+    p.ADDI('x9', 'x0', 42)
+    p.C_SW('x9', 'x8', 0)
+    p.C_LW('x10', 'x8', 0)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 2: C.SW + C.LW (offset 4)
+    p.ADDI('x9', 'x0', 77)
+    p.C_SW('x9', 'x8', 4)
+    p.C_LW('x10', 'x8', 4)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 77)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 3: C.SWSP + C.LWSP (sp-relative, offset 8)
+    p.ADDI('x9', 'x0', 88)
+    p.C_SWSP('x9', 8)
+    p.C_LWSP('x10', 8)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 88)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 4: C.SWSP + C.LWSP (offset 12)
+    p.ADDI('x9', 'x0', 99)
+    p.C_SWSP('x9', 12)
+    p.C_LWSP('x10', 12)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 99)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 5: Verify value at offset 0 still intact
+    p.C_LW('x10', 'x8', 0)
+    p.ALIGN4()
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_c_load_store', p)
+
+
+def gen_test_c_ebreak():
+    """C.EBREAK (16-bit) should trigger breakpoint trap with mcause=3."""
+    CSR_MTVEC  = 0x305
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.CSRRS('x11', CSR_MEPC, 'x0')
+    p.ADDI('x11', 'x11', 4)     # skip C.EBREAK(2) + ALIGN4 padding(2)
+    p.CSRRW('x0', CSR_MEPC, 'x11')
+    p.MRET()
+
+    p.label('skip_handler')
+    # trap_handler is at address 4
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    p.ALIGN4()
+    p.C_EBREAK()
+    p.ALIGN4()
+
+    # Check mcause = 3 (breakpoint)
+    p.ADDI('x7', 'x0', 3)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_c_ebreak', p)
+
+
+def gen_test_wfi():
+    """WFI halts CPU until timer interrupt. Requires -DWFI_TIMER_CYCLES=N."""
+    CSR_MSTATUS = 0x300
+    CSR_MIE     = 0x304
+    CSR_MTVEC   = 0x305
+    CSR_MCAUSE  = 0x342
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.MRET()
+
+    p.label('skip_handler')
+    # Set mtvec to trap_handler (address 4)
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Enable timer interrupt in MIE (bit 7 = MTIE)
+    p.ADDI('x5', 'x0', 0x80)
+    p.CSRRS('x0', CSR_MIE, 'x5')
+
+    # Enable global interrupts in MSTATUS (bit 3 = MIE)
+    p.ADDI('x5', 'x0', 0x08)
+    p.CSRRS('x0', CSR_MSTATUS, 'x5')
+
+    # Mark pre-WFI
+    p.ADDI('x15', 'x0', 1)
+
+    # WFI — halt until timer interrupt
+    p.WFI()
+
+    # Post-WFI: verify we woke up
+    p.ADDI('x15', 'x15', 1)
+    p.ADDI('x7', 'x0', 2)
+    p.BNE('x15', 'x7', 'fail')
+
+    # Verify mcause = 0x80000007 (machine timer interrupt)
+    p.LI('x7', 0x80000007)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_wfi', p)
+
+
 # ============================================================================
 # MAIN: Generate all tests
 # ============================================================================
@@ -1528,6 +2413,33 @@ ALL_TESTS = [
     # Branch prediction
     ('test_bp_loop',       gen_test_bp_loop,       'Branch prediction loop (BHT+BTB learning)'),
     ('test_bp_mispredict', gen_test_bp_mispredict, 'Branch misprediction recovery (alternating pattern)'),
+    # R12B: RV32A Atomics
+    ('test_lr_sc',           gen_test_lr_sc,           'LR.W/SC.W (success/fail paths)'),
+    ('test_amoswap',         gen_test_amoswap,         'AMOSWAP.W (swap and return old)'),
+    ('test_amoadd',          gen_test_amoadd,          'AMOADD.W (atomic add)'),
+    ('test_amo_logic',       gen_test_amo_logic,       'AMOAND/AMOOR/AMOXOR (bitwise atomics)'),
+    ('test_amo_minmax',      gen_test_amo_minmax,      'AMOMIN/AMOMAX/AMOMINU/AMOMAXU'),
+    # R12B: Exception tests
+    ('test_illegal_instr',   gen_test_illegal_instr,   'Illegal instruction trap (mcause=2)'),
+    ('test_misalign_load',   gen_test_misalign_load,   'Misaligned LW trap (mcause=4)'),
+    ('test_misalign_store',  gen_test_misalign_store,  'Misaligned SW trap (mcause=6)'),
+    ('test_exception_priority', gen_test_exception_priority, 'ECALL/EBREAK sequential traps'),
+    # R12B: Pipeline stress
+    ('test_back_to_back_jal', gen_test_back_to_back_jal, 'Rapid JAL/JALR chain'),
+    ('test_csr_write_read',  gen_test_csr_write_read,  'CSR write-then-read forwarding'),
+    ('test_div_use',         gen_test_div_use,         'DIV result used immediately'),
+    ('test_load_branch',     gen_test_load_branch,     'Load then branch (hazard stress)'),
+    ('test_store_load_fwd',  gen_test_store_load_forwarding,  'Store then load same address'),
+    # R12B: CSR identity tests
+    ('test_misa_readonly',   gen_test_misa_readonly,   'MISA read (RV32IMAC) + write ignored'),
+    ('test_mvendorid',       gen_test_mvendorid,       'Machine identity CSRs + mhartid=0'),
+    # RV32C Compressed instructions
+    ('test_c_arith',         gen_test_c_arith,         'C.LI/ADDI/LUI/MV/ADD/NOP/SLLI/SRLI/SRAI/ANDI/SUB/XOR/OR/AND'),
+    ('test_c_branch_jump',   gen_test_c_branch_jump,   'C.J/JAL/BEQZ/BNEZ/JR/JALR (compressed branches & jumps)'),
+    ('test_c_load_store',    gen_test_c_load_store,    'C.LW/SW/LWSP/SWSP (compressed loads & stores)'),
+    ('test_c_ebreak',        gen_test_c_ebreak,        'C.EBREAK trap (mcause=3, 16-bit instruction)'),
+    # WFI
+    ('test_wfi',             gen_test_wfi,             'WFI halt + timer interrupt wakeup'),
 ]
 
 if __name__ == '__main__':
