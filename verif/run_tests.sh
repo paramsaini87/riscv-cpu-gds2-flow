@@ -38,6 +38,26 @@ run_test() {
     if [ "${test_name}" = "test_wfi" ]; then
         extra_flags="${extra_flags} -DWFI_TIMER_CYCLES=200"
     fi
+    # Add NMI pulse for nmi test
+    if [ "${test_name}" = "test_nmi" ]; then
+        extra_flags="${extra_flags} -DNMI_CYCLES=50"
+    fi
+    # Add timer interrupt for vectored interrupt test
+    if [ "${test_name}" = "test_vectored_irq" ]; then
+        extra_flags="${extra_flags} -DWFI_TIMER_CYCLES=80"
+    fi
+    # Add software interrupt for MSIP test
+    if [ "${test_name}" = "test_soft_irq" ]; then
+        extra_flags="${extra_flags} -DSOFT_IRQ_CYCLES=80"
+    fi
+    # Add instruction memory error for fetch fault test
+    if [ "${test_name}" = "test_imem_error" ]; then
+        extra_flags="${extra_flags} -DIMEM_ERROR_CYCLES=30"
+    fi
+    # Add NMI + timer for NMI-during-interrupt test
+    if [ "${test_name}" = "test_nmi_during_irq" ]; then
+        extra_flags="${extra_flags} -DWFI_TIMER_CYCLES=80 -DNMI_CYCLES=120"
+    fi
     TOTAL=$((TOTAL + 1))
 
     printf "  [%-24s] " "${test_name}${suffix}"

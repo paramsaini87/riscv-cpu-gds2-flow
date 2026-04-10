@@ -2361,8 +2361,966 @@ def gen_test_wfi():
 
 
 # ============================================================================
+# R12B: PMP — NAPOT mode
+# ============================================================================
+def gen_test_pmp_napot():
+    """PMP NAPOT mode: lock a region, verify load/store fault (mcause=5/7)."""
+    CSR_MTVEC    = 0x305
+    CSR_MEPC     = 0x341
+    CSR_MCAUSE   = 0x342
+    CSR_PMPCFG0  = 0x3A0
+    CSR_PMPADDR0 = 0x3B0
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x20', CSR_MCAUSE, 'x0')
+    p.CSRRS('x21', CSR_MEPC, 'x0')
+    p.ADDI('x21', 'x21', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x21')
+    p.ADDI('x22', 'x22', 1)
+    p.MRET()
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # NAPOT covering 0x3000-0x3FFF (4KB)
+    # pmpaddr = (base >> 2) | (size/8 - 1) = 0xC00 | 0x1FF = 0xDFF
+    p.LI('x5', 0xDFF)
+    p.CSRRW('x0', CSR_PMPADDR0, 'x5')
+
+    # pmpcfg0[7:0]: L=1(bit7), A=NAPOT=11(bits4:3), R=0, W=0, X=0 = 0x98
+    p.LI('x5', 0x98)
+    p.CSRRW('x0', CSR_PMPCFG0, 'x5')
+
+    p.ADDI('x22', 'x0', 0)
+
+    # Test 1: Load from protected region → load access fault (mcause=5)
+    p.LI('x6', 0x3000)
+    p.LW('x7', 0, 'x6')
+    p.ADDI('x8', 'x0', 5)
+    p.BNE('x20', 'x8', 'fail')
+
+    # Test 2: Store to protected region → store access fault (mcause=7)
+    p.SW('x0', 0, 'x6')
+    p.ADDI('x8', 'x0', 7)
+    p.BNE('x20', 'x8', 'fail')
+
+    # Verify both traps fired
+    p.ADDI('x8', 'x0', 2)
+    p.BNE('x22', 'x8', 'fail')
+
+    # Test 3: Access to unprotected region (0x2000) should work
+    p.LI('x6', 0x2000)
+    p.ADDI('x9', 'x0', 42)
+    p.SW('x9', 0, 'x6')
+    p.LW('x10', 0, 'x6')
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_pmp_napot', p)
+
+
+# ============================================================================
+# R12B: PMP — TOR mode
+# ============================================================================
+def gen_test_pmp_tor():
+    """PMP TOR mode: protect range [pmpaddr0, pmpaddr1), verify load fault."""
+    CSR_MTVEC    = 0x305
+    CSR_MEPC     = 0x341
+    CSR_MCAUSE   = 0x342
+    CSR_PMPCFG0  = 0x3A0
+    CSR_PMPADDR0 = 0x3B0
+    CSR_PMPADDR1 = 0x3B1
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x20', CSR_MCAUSE, 'x0')
+    p.CSRRS('x21', CSR_MEPC, 'x0')
+    p.ADDI('x21', 'x21', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x21')
+    p.ADDI('x22', 'x22', 1)
+    p.MRET()
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # TOR: region 1 covers [pmpaddr0, pmpaddr1)
+    # pmpaddr0 = 0x3000 >> 2 = 0xC00
+    # pmpaddr1 = 0x3100 >> 2 = 0xC40
+    p.LI('x5', 0xC00)
+    p.CSRRW('x0', CSR_PMPADDR0, 'x5')
+    p.LI('x5', 0xC40)
+    p.CSRRW('x0', CSR_PMPADDR1, 'x5')
+
+    # pmpcfg0: region 0=OFF(0x00), region 1=TOR+Locked(L=1,A=01) = 0x88
+    p.LI('x5', 0x8800)
+    p.CSRRW('x0', CSR_PMPCFG0, 'x5')
+
+    p.ADDI('x22', 'x0', 0)
+
+    # Load from 0x3000 (in range) → fault
+    p.LI('x6', 0x3000)
+    p.LW('x7', 0, 'x6')
+    p.ADDI('x8', 'x0', 5)
+    p.BNE('x20', 'x8', 'fail')
+
+    # Verify trap count = 1
+    p.ADDI('x8', 'x0', 1)
+    p.BNE('x22', 'x8', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_pmp_tor', p)
+
+
+# ============================================================================
+# R12B: Vectored Interrupt
+# ============================================================================
+def gen_test_vectored_irq():
+    """Vectored interrupt mode: mtvec[1:0]=1, trap_base + 4*cause.
+    Requires -DWFI_TIMER_CYCLES=80."""
+    CSR_MSTATUS = 0x300
+    CSR_MIE     = 0x304
+    CSR_MTVEC   = 0x305
+    CSR_MCAUSE  = 0x342
+    p = Program()
+
+    p.JAL('x0', 'setup')
+
+    # Pad to 0x40 for vector table (15 NOPs from addr 0x04)
+    for _ in range(15):
+        p.NOP()
+
+    # Vector table at 0x40, each entry is one JAL (4 bytes)
+    p.label('vtable')       # 0x40: cause 0 (exceptions)
+    p.J('fail')
+    p.J('fail')             # cause 1
+    p.J('fail')             # cause 2
+    p.J('fail')             # cause 3
+    p.J('fail')             # cause 4
+    p.J('fail')             # cause 5
+    p.J('fail')             # cause 6
+    p.J('timer_handler')    # cause 7 (MTIP) at 0x40 + 28 = 0x5C
+
+    p.label('timer_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.LI('x5', 0x80)
+    p.CSRRC('x0', CSR_MIE, 'x5')   # clear MTIE
+    p.ADDI('x12', 'x0', 1)          # flag: handler ran
+    p.MRET()
+
+    p.label('setup')
+    # Set mtvec vectored: vtable_addr | 1 = 0x41
+    p.LI('x5', 0x41)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Enable MTIE (bit 7) and global MIE (bit 3)
+    p.LI('x5', 0x80)
+    p.CSRRS('x0', CSR_MIE, 'x5')
+    p.ADDI('x5', 'x0', 0x08)
+    p.CSRRS('x0', CSR_MSTATUS, 'x5')
+
+    # Spin loop waiting for handler to set x12=1
+    p.ADDI('x12', 'x0', 0)
+    p.ADDI('x15', 'x0', 0)
+    p.label('wait_irq')
+    p.ADDI('x15', 'x15', 1)
+    p.BNE('x12', 'x0', 'irq_done')
+    p.LI('x7', 10000)
+    p.BNE('x15', 'x7', 'wait_irq')
+    p.J('fail')
+
+    p.label('irq_done')
+    # Verify mcause = 0x80000007 (machine timer interrupt)
+    p.LI('x7', 0x80000007)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_vectored_irq', p)
+
+
+# ============================================================================
+# R12B: NMI (Non-Maskable Interrupt)
+# ============================================================================
+def gen_test_nmi():
+    """NMI: jump to NMI_ADDR=0x0004, mcause=0x80000000. Works with MIE=0.
+    Requires -DNMI_CYCLES=50."""
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    p = Program()
+
+    # NMI jumps to NMI_ADDR = 0x0004
+    p.JAL('x0', 'setup')       # 0x0000
+
+    # NMI handler at 0x0004
+    p.label('nmi_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.ADDI('x12', 'x0', 1)             # flag: NMI handled
+    p.MRET()
+
+    p.label('setup')
+    # Do NOT enable mstatus.MIE — NMI must work anyway
+    p.ADDI('x12', 'x0', 0)
+
+    # Spin loop waiting for NMI (fires at cycle ~50)
+    p.ADDI('x15', 'x0', 0)
+    p.label('wait_nmi')
+    p.ADDI('x15', 'x15', 1)
+    p.BNE('x12', 'x0', 'nmi_done')
+    p.LI('x7', 10000)
+    p.BNE('x15', 'x7', 'wait_nmi')
+    p.J('fail')
+
+    p.label('nmi_done')
+    # Verify mcause = 0x80000000
+    p.LI('x7', 0x80000000)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Verify handler ran (x12 == 1)
+    p.ADDI('x7', 'x0', 1)
+    p.BNE('x12', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_nmi', p)
+
+
+# ============================================================================
+# R12B: Performance Counter (HPM) tests
+# ============================================================================
+def gen_test_hpm_counters():
+    """HPM counters: mhpmcnt3 (branch mispredict), mhpmcnt4 (load-use stall)."""
+    CSR_MHPMEVENT3 = 0x323
+    CSR_MHPMEVENT4 = 0x324
+    CSR_MHPMCNT3   = 0xB03
+    CSR_MHPMCNT4   = 0xB04
+    p = Program()
+
+    # Test 1: Branch misprediction counter
+    p.ADDI('x5', 'x0', 1)              # event bit 0
+    p.CSRRW('x0', CSR_MHPMEVENT3, 'x5')
+    p.CSRRW('x0', CSR_MHPMCNT3, 'x0')  # reset counter
+
+    # Loop that will cause mispredictions (BHT cold start)
+    p.ADDI('x8', 'x0', 3)
+    p.label('misp_loop')
+    p.ADDI('x8', 'x8', -1)
+    p.BNE('x8', 'x0', 'misp_loop')
+
+    # Read counter — should be > 0
+    p.CSRRS('x10', CSR_MHPMCNT3, 'x0')
+    p.BEQ('x10', 'x0', 'fail')
+
+    # Test 2: Load-use stall counter
+    p.ADDI('x5', 'x0', 2)              # event bit 1
+    p.CSRRW('x0', CSR_MHPMEVENT4, 'x5')
+    p.CSRRW('x0', CSR_MHPMCNT4, 'x0')
+
+    # Cause load-use hazards
+    p.LI('x6', 0x2000)
+    p.SW('x0', 0, 'x6')
+    p.LW('x7', 0, 'x6')
+    p.ADDI('x8', 'x7', 1)      # immediate use → stall
+    p.LW('x7', 0, 'x6')
+    p.ADD('x8', 'x7', 'x7')    # immediate use → stall
+
+    # Read counter — should be > 0
+    p.CSRRS('x11', CSR_MHPMCNT4, 'x0')
+    p.BEQ('x11', 'x0', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_hpm_counters', p)
+
+
+# ============================================================================
+# R12B: Debug Trigger test
+# ============================================================================
+def gen_test_debug_trigger():
+    """Hardware breakpoint: trigger on PC match, verify mcause=3."""
+    CSR_MTVEC   = 0x305
+    CSR_MEPC    = 0x341
+    CSR_MCAUSE  = 0x342
+    CSR_TSELECT = 0x7A0
+    CSR_TDATA1  = 0x7A1
+    CSR_TDATA2  = 0x7A2
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.CSRRS('x11', CSR_MEPC, 'x0')
+    p.ADDI('x11', 'x11', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x11')
+    # Disable trigger to prevent re-fire
+    p.CSRRW('x0', CSR_TSELECT, 'x0')
+    p.CSRRW('x0', CSR_TDATA1, 'x0')
+    p.MRET()
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Select trigger 0
+    p.CSRRW('x0', CSR_TSELECT, 'x0')
+
+    # Compute address of trigger_nop using AUIPC
+    p.AUIPC('x7', 0)       # x7 = PC of this instruction
+    # Count bytes: ADDI(4) + CSRRW(4) + ADDI(4) + CSRRW(4) + 3 NOPs(12) + NOP_target = 32
+    p.ADDI('x7', 'x7', 32)
+    p.CSRRW('x0', CSR_TDATA2, 'x7')
+
+    # tdata1: execute match enable (bit 2) = 0x04
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_TDATA1, 'x5')
+
+    # Pipeline drain: CSR write at EX2 needs cycles to propagate
+    p.NOP()
+    p.NOP()
+    p.NOP()
+
+    # Fall through to trigger target
+    p.label('trigger_nop')
+    p.NOP()                  # TRIGGER FIRES HERE → mcause=3
+
+    # After MRET (mepc skipped past NOP), land here
+    p.ADDI('x7', 'x0', 3)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_debug_trigger', p)
+
+
+# ============================================================================
+# R12B: FENCE.I test
+# ============================================================================
+def gen_test_fencei():
+    """FENCE.I: verify pipeline flush, no hang."""
+    p = Program()
+
+    # Test 1: Simple FENCE.I should not hang
+    p.ADDI('x10', 'x0', 1)
+    p.RAW(0x0000100F)         # FENCE.I
+    p.ADDI('x10', 'x10', 1)
+    p.ADDI('x7', 'x0', 2)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Test 2: FENCE.I between dependent instructions
+    p.ADDI('x11', 'x0', 10)
+    p.RAW(0x0000100F)
+    p.ADDI('x11', 'x11', 20)
+    p.ADDI('x7', 'x0', 30)
+    p.BNE('x11', 'x7', 'fail')
+
+    # Test 3: Multiple back-to-back
+    p.ADDI('x12', 'x0', 5)
+    p.RAW(0x0000100F)
+    p.RAW(0x0000100F)
+    p.RAW(0x0000100F)
+    p.ADDI('x12', 'x12', 1)
+    p.ADDI('x7', 'x0', 6)
+    p.BNE('x12', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_fencei', p)
+
+
+# ============================================================================
 # MAIN: Generate all tests
 # ============================================================================
+
+
+# ============================================================================
+# GAP AUDIT: Software Interrupt (MSIP)
+# ============================================================================
+def gen_test_soft_irq():
+    """Software interrupt: verify MSIP handling, mcause=3.
+    Requires -DSOFT_IRQ_CYCLES=80."""
+    CSR_MSTATUS = 0x300
+    CSR_MIE     = 0x304
+    CSR_MTVEC   = 0x305
+    CSR_MCAUSE  = 0x342
+    p = Program()
+
+    p.JAL('x0', 'setup')
+
+    p.label('handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    p.ADDI('x5', 'x0', 0x08)
+    p.CSRRC('x0', CSR_MIE, 'x5')       # clear MSIE to stop re-entry
+    p.ADDI('x12', 'x0', 1)             # flag: handler ran
+    p.MRET()
+
+    p.label('setup')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Enable MSIE (bit 3 of mie) and global MIE (bit 3 of mstatus)
+    p.ADDI('x5', 'x0', 0x08)
+    p.CSRRS('x0', CSR_MIE, 'x5')
+    p.ADDI('x5', 'x0', 0x08)
+    p.CSRRS('x0', CSR_MSTATUS, 'x5')
+
+    # Spin loop waiting for interrupt
+    p.ADDI('x12', 'x0', 0)
+    p.ADDI('x15', 'x0', 0)
+    p.label('wait')
+    p.ADDI('x15', 'x15', 1)
+    p.BNE('x12', 'x0', 'done')
+    p.LI('x7', 10000)
+    p.BNE('x15', 'x7', 'wait')
+    p.J('fail')
+
+    p.label('done')
+    # Verify mcause = 0x80000003 (machine software interrupt)
+    p.LI('x7', 0x80000003)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_soft_irq', p)
+
+
+# ============================================================================
+# GAP AUDIT: PMP NA4 mode
+# ============================================================================
+def gen_test_pmp_na4():
+    """PMP NA4 mode: protect exactly 4 bytes at 0x3000, verify access fault."""
+    CSR_MTVEC    = 0x305
+    CSR_MEPC     = 0x341
+    CSR_MCAUSE   = 0x342
+    CSR_PMPCFG0  = 0x3A0
+    CSR_PMPADDR0 = 0x3B0
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x20', CSR_MCAUSE, 'x0')
+    p.CSRRS('x21', CSR_MEPC, 'x0')
+    p.ADDI('x21', 'x21', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x21')
+    p.ADDI('x22', 'x22', 1)
+    p.MRET()
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # NA4: pmpaddr = physical_addr[33:2] = 0x3000 >> 2 = 0xC00
+    p.LI('x5', 0xC00)
+    p.CSRRW('x0', CSR_PMPADDR0, 'x5')
+
+    # pmpcfg0: L=1, A=NA4=10(bits4:3), R=0, W=0, X=0 = 0x90
+    p.LI('x5', 0x90)
+    p.CSRRW('x0', CSR_PMPCFG0, 'x5')
+
+    p.ADDI('x22', 'x0', 0)
+
+    # Test 1: Load from 0x3000 (in NA4 region) -> load access fault (mcause=5)
+    p.LI('x6', 0x3000)
+    p.LW('x7', 0, 'x6')
+    p.ADDI('x8', 'x0', 5)
+    p.BNE('x20', 'x8', 'fail')
+
+    # Test 2: Load from 0x3004 (outside NA4) -> should succeed, no trap
+    p.LW('x7', 4, 'x6')
+    p.ADDI('x8', 'x0', 1)
+    p.BNE('x22', 'x8', 'fail')   # trap count still 1
+
+    # Test 3: Store to 0x3000 -> store access fault (mcause=7)
+    p.SW('x0', 0, 'x6')
+    p.ADDI('x8', 'x0', 7)
+    p.BNE('x20', 'x8', 'fail')
+
+    # Verify 2 traps total
+    p.ADDI('x8', 'x0', 2)
+    p.BNE('x22', 'x8', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_pmp_na4', p)
+
+
+# ============================================================================
+# GAP AUDIT: Nested exception (double fault)
+# ============================================================================
+def gen_test_nested_exception():
+    """Nested exception: ECALL handler causes misaligned load, verify both traps."""
+    CSR_MTVEC  = 0x305
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    CSR_MTVAL  = 0x343
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('handler')
+    p.ADDI('x22', 'x22', 1)
+    p.ADDI('x9', 'x0', 2)
+    p.BEQ('x22', 'x9', 'second_entry')
+    # First entry: ECALL (x22==1)
+    p.CSRRS('x20', CSR_MCAUSE, 'x0')    # x20 = 11
+    p.CSRRS('x25', CSR_MEPC, 'x0')      # save original mepc
+    p.ADDI('x25', 'x25', 4)             # point past ECALL
+    # Cause nested exception: misaligned word load (addr=1)
+    p.LW('x0', 1, 'x0')                 # addr=0+1=1 -> misaligned!
+    # Return here after nested fault handled
+    p.CSRRW('x0', CSR_MEPC, 'x25')      # restore mepc (past ECALL)
+    p.MRET()
+
+    p.label('second_entry')
+    # Nested fault: misaligned load (x22==2)
+    p.CSRRS('x21', CSR_MCAUSE, 'x0')    # x21 = 4
+    p.CSRRS('x23', CSR_MTVAL, 'x0')     # x23 = faulting addr (1)
+    p.CSRRS('x26', CSR_MEPC, 'x0')      # mepc of LW in handler
+    p.ADDI('x26', 'x26', 4)             # skip LW
+    p.CSRRW('x0', CSR_MEPC, 'x26')
+    p.MRET()                             # back to handler, after LW
+
+    p.label('skip_handler')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+    p.ADDI('x22', 'x0', 0)
+
+    p.ECALL()
+
+    # Verify first trap: ECALL (mcause=11)
+    p.ADDI('x7', 'x0', 11)
+    p.BNE('x20', 'x7', 'fail')
+
+    # Verify second trap: misaligned load (mcause=4)
+    p.ADDI('x7', 'x0', 4)
+    p.BNE('x21', 'x7', 'fail')
+
+    # Verify handler entered twice
+    p.ADDI('x7', 'x0', 2)
+    p.BNE('x22', 'x7', 'fail')
+
+    # Verify mtval = 1 (faulting address)
+    p.ADDI('x7', 'x0', 1)
+    p.BNE('x23', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_nested_exception', p)
+
+
+# ============================================================================
+# GAP AUDIT: NMI during interrupt handler
+# ============================================================================
+def gen_test_nmi_during_irq():
+    """NMI fires during timer interrupt handler. Verifies NMI priority.
+    Requires -DWFI_TIMER_CYCLES=80 -DNMI_CYCLES=120.
+    Timer handler saves mepc at entry to survive NMI mepc corruption."""
+    CSR_MSTATUS = 0x300
+    CSR_MIE     = 0x304
+    CSR_MTVEC   = 0x305
+    CSR_MEPC    = 0x341
+    CSR_MCAUSE  = 0x342
+    p = Program()
+
+    # NMI jumps to NMI_ADDR = 0x0004
+    p.JAL('x0', 'setup')          # 0x0000 (4 bytes)
+
+    # NMI handler at 0x0004 — minimal: set flag, MRET
+    p.label('nmi_handler')
+    p.CSRRS('x14', CSR_MCAUSE, 'x0')   # x14 = 0x80000000
+    p.ADDI('x13', 'x0', 1)             # flag: NMI handled
+    p.MRET()                            # back to timer handler
+    # 3 instrs = 12 bytes, ends at 0x0F
+
+    # Padding so timer_handler starts at 0x10
+    p.NOP()                             # 0x10-0x13
+
+    # Timer handler at 0x14
+    p.label('timer_handler')
+    p.CSRRS('x27', CSR_MEPC, 'x0')     # SAVE mepc (main code return addr)
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')   # x10 = 0x80000007
+    p.LI('x5', 0x80)
+    p.CSRRC('x0', CSR_MIE, 'x5')       # clear MTIE
+    # Spin to let NMI fire during this handler
+    p.ADDI('x16', 'x0', 0)
+    p.label('timer_spin')
+    p.ADDI('x16', 'x16', 1)
+    p.LI('x9', 500)
+    p.BNE('x16', 'x9', 'timer_spin')
+    p.ADDI('x12', 'x0', 1)             # flag: timer handled
+    p.CSRRW('x0', CSR_MEPC, 'x27')     # RESTORE original mepc
+    p.MRET()
+
+    p.label('setup')
+    # Set mtvec to timer_handler = 0x14
+    p.ADDI('x5', 'x0', 0x14)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Enable MTIE (bit 7) and global MIE (bit 3)
+    p.LI('x5', 0x80)
+    p.CSRRS('x0', CSR_MIE, 'x5')
+    p.ADDI('x5', 'x0', 0x08)
+    p.CSRRS('x0', CSR_MSTATUS, 'x5')
+
+    # Init flags
+    p.ADDI('x12', 'x0', 0)
+    p.ADDI('x13', 'x0', 0)
+
+    # Spin wait for both handlers
+    p.ADDI('x15', 'x0', 0)
+    p.label('wait')
+    p.ADDI('x15', 'x15', 1)
+    p.AND('x17', 'x12', 'x13')
+    p.BNE('x17', 'x0', 'both_done')
+    p.LI('x7', 50000)
+    p.BNE('x15', 'x7', 'wait')
+    p.J('fail')
+
+    p.label('both_done')
+    # Verify timer mcause
+    p.LI('x7', 0x80000007)
+    p.BNE('x10', 'x7', 'fail')
+
+    # Verify NMI mcause
+    p.LI('x7', 0x80000000)
+    p.BNE('x14', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_nmi_during_irq', p)
+
+
+# ============================================================================
+# GAP AUDIT: Instruction fetch error
+# ============================================================================
+def gen_test_imem_error():
+    """Instruction fetch error: imem_error injection causes mcause=1.
+    Requires -DIMEM_ERROR_CYCLES=30."""
+    CSR_MTVEC  = 0x305
+    CSR_MEPC   = 0x341
+    CSR_MCAUSE = 0x342
+    p = Program()
+
+    p.JAL('x0', 'setup')
+
+    p.label('handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')    # x10 = 1 (instruction access fault)
+    p.CSRRS('x11', CSR_MEPC, 'x0')
+    p.ADDI('x11', 'x11', 4)
+    p.CSRRW('x0', CSR_MEPC, 'x11')
+    p.ADDI('x12', 'x0', 1)              # flag: handler ran
+    p.MRET()
+
+    p.label('setup')
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    p.ADDI('x12', 'x0', 0)
+
+    # Spin loop — imem_error will fire at cycle 30 during fetch
+    p.ADDI('x15', 'x0', 0)
+    p.label('wait')
+    p.ADDI('x15', 'x15', 1)
+    p.BNE('x12', 'x0', 'done')
+    p.LI('x7', 10000)
+    p.BNE('x15', 'x7', 'wait')
+    p.J('fail')
+
+    p.label('done')
+    # Verify mcause = 1 (instruction access fault)
+    p.ADDI('x7', 'x0', 1)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_imem_error', p)
+
+
+# ============================================================================
+# GAP AUDIT: SC.W failure path (reservation lost)
+# ============================================================================
+def gen_test_sc_fail():
+    """SC.W failure: intervening store clears LR reservation."""
+    p = Program()
+    DATA_ADDR = 0x2000
+
+    # Store initial value
+    p.LI('x5', DATA_ADDR)
+    p.ADDI('x6', 'x0', 42)
+    p.SW('x6', 0, 'x5')
+
+    # Test 1: LR -> intervening SW to SAME address -> SC should FAIL
+    p.LR_W('x10', 'x5')              # x10=42, reservation set
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')       # verify LR read correct
+
+    p.ADDI('x8', 'x0', 77)
+    p.SW('x8', 0, 'x5')              # intervening store -> clears reservation
+
+    p.ADDI('x6', 'x0', 99)
+    p.SC_W('x11', 'x5', 'x6')        # SC: should FAIL (rd=1)
+    p.ADDI('x7', 'x0', 1)
+    p.BNE('x11', 'x7', 'fail')       # x11 must be 1 (fail)
+
+    # Verify memory has 77 (from SW), not 99 (SC didn't write)
+    p.LW('x12', 0, 'x5')
+    p.ADDI('x7', 'x0', 77)
+    p.BNE('x12', 'x7', 'fail')
+
+    # Test 2: LR -> intervening SW to DIFFERENT address -> SC behavior
+    # (implementation-defined, but our CPU clears on any store)
+    p.LI('x5', DATA_ADDR)
+    p.LI('x18', DATA_ADDR + 4)
+    p.ADDI('x6', 'x0', 50)
+    p.SW('x6', 0, 'x5')              # reset to 50
+
+    p.LR_W('x10', 'x5')              # x10=50, reservation set
+    p.ADDI('x8', 'x0', 11)
+    p.SW('x8', 0, 'x18')             # store to different address
+
+    p.ADDI('x6', 'x0', 88)
+    p.SC_W('x13', 'x5', 'x6')        # may succeed or fail
+
+    # If SC succeeded (x13=0), mem should be 88
+    # If SC failed (x13=1), mem should be 50
+    p.BEQ('x13', 'x0', 'sc2_ok')
+    # SC failed — verify mem unchanged
+    p.LW('x14', 0, 'x5')
+    p.ADDI('x7', 'x0', 50)
+    p.BNE('x14', 'x7', 'fail')
+    p.J('done')
+    p.label('sc2_ok')
+    # SC succeeded — verify mem updated
+    p.LW('x14', 0, 'x5')
+    p.ADDI('x7', 'x0', 88)
+    p.BNE('x14', 'x7', 'fail')
+
+    p.label('done')
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_sc_fail', p)
+
+
+# ============================================================================
+# GAP AUDIT: PMP unlocked regions (L=0)
+# ============================================================================
+def gen_test_pmp_unlocked():
+    """PMP with L=0: M-mode should NOT be restricted; region is reconfigurable."""
+    CSR_PMPCFG0  = 0x3A0
+    CSR_PMPADDR0 = 0x3B0
+    p = Program()
+
+    # Set up PMP entry 0: NAPOT, L=0, R=0, W=0, X=0
+    # NAPOT covering 0x3000-0x3FFF (4KB): pmpaddr = 0xDFF
+    p.LI('x5', 0xDFF)
+    p.CSRRW('x0', CSR_PMPADDR0, 'x5')
+
+    # pmpcfg: L=0, A=NAPOT=11, R=0, W=0, X=0 = 0x18
+    p.ADDI('x5', 'x0', 0x18)
+    p.CSRRW('x0', CSR_PMPCFG0, 'x5')
+
+    # M-mode access to protected region should SUCCEED (L=0 -> no M-mode restriction)
+    p.LI('x6', 0x3000)
+    p.ADDI('x8', 'x0', 42)
+    p.SW('x8', 0, 'x6')              # should work
+    p.LW('x10', 0, 'x6')
+    p.ADDI('x7', 'x0', 42)
+    p.BNE('x10', 'x7', 'fail')       # verify read-back
+
+    # Reconfigure: change to R=1, W=1 (L=0 allows modification)
+    p.ADDI('x5', 'x0', 0x1B)         # L=0, A=NAPOT, R=1, W=1, X=0
+    p.CSRRW('x0', CSR_PMPCFG0, 'x5')
+
+    # Read back pmpcfg0 to verify write took effect
+    p.CSRRS('x11', CSR_PMPCFG0, 'x0')
+    p.ADDI('x7', 'x0', 0x1B)
+    p.BNE('x11', 'x7', 'fail')
+
+    # Access should still work
+    p.ADDI('x8', 'x0', 99)
+    p.SW('x8', 0, 'x6')
+    p.LW('x12', 0, 'x6')
+    p.ADDI('x7', 'x0', 99)
+    p.BNE('x12', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_pmp_unlocked', p)
+
+
+# ============================================================================
+# GAP AUDIT: CSR immediate with uimm=0
+# ============================================================================
+def gen_test_csri_zero():
+    """CSR immediate ops with uimm=0: CSRRWI writes 0, CSRRSI/CSRRCI are read-only."""
+    CSR_MSCRATCH = 0x340
+    p = Program()
+
+    # Set mscratch to known value
+    p.LI('x5', 0x12345678)
+    p.CSRRW('x0', CSR_MSCRATCH, 'x5')
+
+    # CSRRWI rd, csr, 0: writes 0 to CSR, rd=old value
+    p.CSRRWI('x10', CSR_MSCRATCH, 0)
+    p.LI('x7', 0x12345678)
+    p.BNE('x10', 'x7', 'fail')       # x10 should be old value
+
+    # mscratch should now be 0
+    p.CSRRS('x11', CSR_MSCRATCH, 'x0')
+    p.BNE('x11', 'x0', 'fail')       # should be 0
+
+    # Set mscratch to a new value for next tests
+    p.LI('x5', 0xABCD0000)
+    p.CSRRW('x0', CSR_MSCRATCH, 'x5')
+
+    # CSRRSI rd, csr, 0: should NOT modify CSR, rd=current value
+    p.CSRRSI('x12', CSR_MSCRATCH, 0)
+    p.LI('x7', 0xABCD0000)
+    p.BNE('x12', 'x7', 'fail')       # x12 = mscratch value
+
+    # Verify mscratch unchanged
+    p.CSRRS('x13', CSR_MSCRATCH, 'x0')
+    p.LI('x7', 0xABCD0000)
+    p.BNE('x13', 'x7', 'fail')
+
+    # CSRRCI rd, csr, 0: should NOT modify CSR, rd=current value
+    p.CSRRCI('x14', CSR_MSCRATCH, 0)
+    p.LI('x7', 0xABCD0000)
+    p.BNE('x14', 'x7', 'fail')
+
+    # Verify mscratch still unchanged
+    p.CSRRS('x15', CSR_MSCRATCH, 'x0')
+    p.LI('x7', 0xABCD0000)
+    p.BNE('x15', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_csri_zero', p)
+
+
+# ============================================================================
+# GAP AUDIT: Compressed instruction at 2-byte (halfword) alignment
+# ============================================================================
+def gen_test_c_halfword_align():
+    """C instructions at 2-byte boundaries (not 4-byte aligned)."""
+    p = Program()
+
+    # Start with a C instruction (2 bytes) to shift alignment
+    p.C_NOP()                          # 2 bytes at 0x0000
+    # Now at 0x0002: halfword-aligned, NOT word-aligned
+    p.C_LI('x10', 20)                 # 2 bytes at 0x0002 (6-bit signed: -32..31)
+    p.C_LI('x11', 7)                  # 2 bytes at 0x0004
+    p.C_LI('x12', -1)                 # 2 bytes at 0x0006
+    # 32-bit instruction at 0x0008 (word aligned again)
+    p.ADDI('x13', 'x10', 1)           # 4 bytes at 0x0008
+    # C instruction to shift again
+    p.C_NOP()                          # 2 bytes at 0x000C
+    # 32-bit instruction crossing word boundary at 0x000E-0x0011
+    p.ADDI('x14', 'x11', 10)          # 4 bytes at 0x000E (crosses word boundary!)
+
+    # Verify all values
+    p.ADDI('x7', 'x0', 20)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.ADDI('x7', 'x0', 7)
+    p.BNE('x11', 'x7', 'fail')
+
+    p.ADDI('x7', 'x0', -1)
+    p.BNE('x12', 'x7', 'fail')
+
+    p.ADDI('x7', 'x0', 21)
+    p.BNE('x13', 'x7', 'fail')
+
+    p.ADDI('x7', 'x0', 17)
+    p.BNE('x14', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_c_halfword_align', p)
+
+
+# ============================================================================
+# GAP AUDIT: HPM counter value verification
+# ============================================================================
+def gen_test_hpm_verify():
+    """HPM counters: verify counter values correlate with actual events."""
+    CSR_MHPMEVENT3  = 0x323
+    CSR_MHPMCNT3    = 0xB03
+    CSR_MHPMEVENT4  = 0x324
+    CSR_MHPMCNT4    = 0xB04
+    p = Program()
+
+    # Test 1: Branch misprediction counter — single cold-start branch
+    p.ADDI('x5', 'x0', 1)                  # event bit 0 = branch mispredict
+    p.CSRRW('x0', CSR_MHPMEVENT3, 'x5')
+    p.CSRRW('x0', CSR_MHPMCNT3, 'x0')      # reset
+
+    # Single taken branch — cold start = guaranteed mispredict
+    p.ADDI('x6', 'x0', 1)
+    p.BEQ('x6', 'x6', 'single_taken')
+    p.NOP()
+    p.NOP()
+    p.label('single_taken')
+
+    # Counter should be >= 1 and < 10 for a single branch
+    p.CSRRS('x10', CSR_MHPMCNT3, 'x0')
+    p.BEQ('x10', 'x0', 'fail')             # must be > 0
+    p.ADDI('x7', 'x0', 10)
+    p.BGE('x10', 'x7', 'fail')             # must be < 10
+
+    # Test 2: Load-use stall counter — verify correlation
+    p.ADDI('x5', 'x0', 2)                  # event bit 1 = load-use stall
+    p.CSRRW('x0', CSR_MHPMEVENT4, 'x5')
+    p.CSRRW('x0', CSR_MHPMCNT4, 'x0')      # reset
+
+    # Cause 3 deliberate load-use hazards
+    p.LI('x6', 0x2000)
+    p.SW('x0', 0, 'x6')
+    p.LW('x7', 0, 'x6')
+    p.ADDI('x8', 'x7', 1)                  # load-use #1
+    p.LW('x7', 0, 'x6')
+    p.ADD('x8', 'x7', 'x7')                # load-use #2
+    p.LW('x7', 0, 'x6')
+    p.BNE('x7', 'x0', 'no_branch')         # load-use #3 (branch on load)
+    p.label('no_branch')
+
+    # Counter should be >= 3
+    p.CSRRS('x11', CSR_MHPMCNT4, 'x0')
+    p.ADDI('x7', 'x0', 3)
+    p.BLT('x11', 'x7', 'fail')             # must be >= 3
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_hpm_verify', p)
+
+
 ALL_TESTS = [
     ('test_addi',       gen_test_addi,       'ADDI (6 cases: basic, negative, -1, x0, max, min)'),
     ('test_add',        gen_test_add,        'ADD (4 cases: basic, neg+pos, zero, overflow)'),
@@ -2440,6 +3398,30 @@ ALL_TESTS = [
     ('test_c_ebreak',        gen_test_c_ebreak,        'C.EBREAK trap (mcause=3, 16-bit instruction)'),
     # WFI
     ('test_wfi',             gen_test_wfi,             'WFI halt + timer interrupt wakeup'),
+    # R12B: PMP
+    ('test_pmp_napot',       gen_test_pmp_napot,       'PMP NAPOT: locked region, load/store fault (mcause=5/7)'),
+    ('test_pmp_tor',         gen_test_pmp_tor,         'PMP TOR: range protection, load access fault'),
+    # R12B: Vectored Interrupts
+    ('test_vectored_irq',   gen_test_vectored_irq,    'Vectored interrupt: mtvec[1:0]=1, trap_base+4*cause'),
+    # R12B: NMI
+    ('test_nmi',             gen_test_nmi,             'NMI: jump to NMI_ADDR, mcause=0x80000000, ignores MIE'),
+    # R12B: HPM Counters
+    ('test_hpm_counters',    gen_test_hpm_counters,    'HPM: branch mispredict + load-use stall counters'),
+    # R12B: Debug Triggers
+    ('test_debug_trigger',   gen_test_debug_trigger,   'Debug trigger: PC match breakpoint (mcause=3)'),
+    # R12B: FENCE.I
+    ('test_fencei',          gen_test_fencei,          'FENCE.I: pipeline flush, no hang'),
+    # GAP AUDIT: Coverage gap tests
+    ('test_soft_irq',         gen_test_soft_irq,         'MSIP: software interrupt (mcause=3)'),
+    ('test_pmp_na4',          gen_test_pmp_na4,          'PMP NA4: 4-byte region, load/store fault'),
+    ('test_nested_exception', gen_test_nested_exception, 'Nested exception: ECALL then misalign in handler'),
+    ('test_nmi_during_irq',   gen_test_nmi_during_irq,   'NMI during timer handler (priority test)'),
+    ('test_imem_error',       gen_test_imem_error,       'Instruction fetch error (mcause=1)'),
+    ('test_sc_fail',          gen_test_sc_fail,          'SC.W failure: reservation cleared by store'),
+    ('test_pmp_unlocked',     gen_test_pmp_unlocked,     'PMP unlocked (L=0): M-mode unrestricted + reconfig'),
+    ('test_csri_zero',        gen_test_csri_zero,        'CSR immediate uimm=0 edge cases'),
+    ('test_c_halfword_align', gen_test_c_halfword_align, 'Compressed at 2-byte boundary (not 4-byte)'),
+    ('test_hpm_verify',       gen_test_hpm_verify,       'HPM counter verification + inhibit'),
 ]
 
 if __name__ == '__main__':

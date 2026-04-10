@@ -113,6 +113,54 @@ module tb_rv32i_cpu;
     end
 `endif
 
+    // NMI pulse for NMI testing
+    reg nmi_r;
+    initial nmi_r = 0;
+`ifdef NMI_CYCLES
+    initial begin
+        repeat(`NMI_CYCLES) @(posedge clk);
+        nmi_r = 1;
+        repeat(10) @(posedge clk);
+        nmi_r = 0;
+    end
+`endif
+
+    // External interrupt for vectored interrupt testing
+    reg ext_irq_r;
+    initial ext_irq_r = 0;
+`ifdef EXT_IRQ_CYCLES
+    initial begin
+        repeat(`EXT_IRQ_CYCLES) @(posedge clk);
+        ext_irq_r = 1;
+        repeat(10) @(posedge clk);
+        ext_irq_r = 0;
+    end
+`endif
+
+    // Software interrupt for MSIP testing
+    reg soft_irq_r;
+    initial soft_irq_r = 0;
+`ifdef SOFT_IRQ_CYCLES
+    initial begin
+        repeat(`SOFT_IRQ_CYCLES) @(posedge clk);
+        soft_irq_r = 1;
+        repeat(10) @(posedge clk);
+        soft_irq_r = 0;
+    end
+`endif
+
+    // Instruction memory error injection
+    reg imem_error_r;
+    initial imem_error_r = 0;
+`ifdef IMEM_ERROR_CYCLES
+    initial begin
+        repeat(`IMEM_ERROR_CYCLES) @(posedge clk);
+        imem_error_r = 1;
+        repeat(10) @(posedge clk);
+        imem_error_r = 0;
+    end
+`endif
+
     // DUT instantiation — 8-stage RV32IMAC CPU
     rv32i_cpu #(
         .RESET_ADDR(32'h0000_0000),
@@ -126,7 +174,7 @@ module tb_rv32i_cpu;
         .imem_req       (imem_req),
         .imem_rdata     (imem_rdata),
         .imem_ready     (imem_ready),
-        .imem_error     (1'b0),
+        .imem_error     (imem_error_r),
         // Data memory
         .dmem_addr      (dmem_addr),
         .dmem_wdata     (dmem_wdata),
@@ -136,11 +184,11 @@ module tb_rv32i_cpu;
         .dmem_rdata     (dmem_rdata),
         .dmem_ready     (dmem_ready),
         .dmem_error     (1'b0),
-        // Interrupts — all inactive for ISA tests
-        .ext_irq        (1'b0),
+        // Interrupts
+        .ext_irq        (ext_irq_r),
         .timer_irq      (timer_irq_r),
-        .soft_irq       (1'b0),
-        .nmi            (1'b0),
+        .soft_irq       (soft_irq_r),
+        .nmi            (nmi_r),
         // Debug — inactive
         .debug_halt     (1'b0),
         .debug_resume   (1'b0),
