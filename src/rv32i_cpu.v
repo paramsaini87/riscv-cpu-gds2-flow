@@ -183,6 +183,9 @@ module rv32i_cpu #(
     wire        nmi_taken;
     wire        wb_exception;
     wire        irq_taken;
+    wire        if2_stall;
+    wire        if2_process_comp_held;
+    wire        sc_fail;
 
     // =========================================================================
     // PIPELINE REGISTERS (7 boundaries for 8-stage pipeline)
@@ -193,6 +196,7 @@ module rv32i_cpu #(
     reg [31:0] if1_if2_pc;
     reg [31:0] if1_if2_instr;
     reg        if1_if2_valid;
+    reg        if2_fetched;       // Tracks whether IF1→IF2 data already consumed by IF2→ID
     reg        if1_if2_pred_taken;
     reg [31:0] if1_if2_pred_target;
     reg        if1_if2_bus_error;
@@ -496,6 +500,10 @@ module rv32i_cpu #(
                 if1_if2_pred_taken  <= if_predict_taken;
                 if1_if2_pred_target <= if_predict_target;
                 if1_if2_bus_error   <= imem_error && imem_ready;
+            end else if (!if2_stall && !if2_process_comp_held) begin
+                // PC is stalled (fetch latency) but IF2 consumed our data;
+                // invalidate to prevent duplicate instruction execution.
+                if1_if2_valid <= 1'b0;
             end
         end
     end
@@ -514,8 +522,12 @@ module rv32i_cpu #(
     wire [15:0] if2_lo_half  = if2_raw_word[15:0];
     wire [15:0] if2_hi_half  = if2_raw_word[31:16];
 
+    // Effective IF1→IF2 valid: gated by consumed flag to prevent re-execution
+    // during fetch stalls (when IF1→IF2 is frozen but downstream keeps running)
+    wire if1_if2_valid_eff = if1_if2_valid && !if2_fetched;
+
     // Detect halfword-aligned entry (after jump/branch to PC[1]=1)
-    wire if2_halfword_start = !if2_held_valid && if1_if2_valid && if1_if2_pc[1];
+    wire if2_halfword_start = !if2_held_valid && if1_if2_valid_eff && if1_if2_pc[1];
     wire if2_hi_is_comp     = (if2_hi_half[1:0] != 2'b11);
 
     // Source selection
@@ -531,11 +543,11 @@ module rv32i_cpu #(
     wire        if2_lo_is_comp = (if2_lo_half[1:0] != 2'b11);
 
     // What kind of instruction are we processing this cycle?
-    wire if2_process_comp_held  = if2_held_is_comp;
-    wire if2_process_span       = if2_held_is_span && if1_if2_valid;
+    assign if2_process_comp_held  = if2_held_is_comp;
+    wire if2_process_span       = if2_held_is_span && if1_if2_valid_eff;
     // Normal word-aligned fresh (PC[1]=0)
-    wire if2_process_comp_fresh = !if2_held_valid && if1_if2_valid && !if1_if2_pc[1] && if2_lo_is_comp;
-    wire if2_process_full_fresh = !if2_held_valid && if1_if2_valid && !if1_if2_pc[1] && !if2_lo_is_comp;
+    wire if2_process_comp_fresh = !if2_held_valid && if1_if2_valid_eff && !if1_if2_pc[1] && if2_lo_is_comp;
+    wire if2_process_full_fresh = !if2_held_valid && if1_if2_valid_eff && !if1_if2_pc[1] && !if2_lo_is_comp;
     // Halfword-aligned entry (PC[1]=1): process from hi_half
     wire if2_process_comp_hi    = if2_halfword_start && if2_hi_is_comp;
     wire if2_process_span_hi    = if2_halfword_start && !if2_hi_is_comp;
@@ -918,7 +930,7 @@ module rv32i_cpu #(
 
     // Determine instruction valid for this cycle
     wire if2_valid_out = (if2_process_comp_held) ||
-                         (if2_process_span && if1_if2_valid) ||
+                         (if2_process_span) ||
                          (if2_process_comp_fresh) ||
                          (if2_process_full_fresh) ||
                          (if2_process_comp_hi);
@@ -949,8 +961,7 @@ module rv32i_cpu #(
     // Raw instruction for mtval
     wire [31:0] if2_instr_raw_out = if2_is_compressed ? {16'b0, if2_cinstr} : if2_instr_pre;
 
-    // --- IF2 stall signal ---
-    wire if2_stall;
+    // --- IF2 stall signal (forward-declared above) ---
 
     // --- IF2/ID Pipeline Register ---
     always @(posedge clk or negedge rst_n) begin
@@ -1021,6 +1032,24 @@ module rv32i_cpu #(
                     if2_held_pc    <= if1_if2_pc;
                 end
             end
+        end
+    end
+
+    // --- IF2 fetch-consumed tracker ---
+    // Prevents re-execution of the same instruction when IF1→IF2 is frozen
+    // during fetch stalls (imem_req && !imem_ready). Once IF2→ID consumes a
+    // fresh instruction from IF1→IF2, this flag blocks further consumption
+    // until a new fetch arrives (!pc_stall) or a flush occurs.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            if2_fetched <= 1'b0;
+        else if (!global_stall && !debug_stall) begin
+            if (pipeline_flush)
+                if2_fetched <= 1'b0;
+            else if (!pc_stall)
+                if2_fetched <= 1'b0;
+            else if (!if2_stall && if2_valid_out && !if2_process_comp_held)
+                if2_fetched <= 1'b1;
         end
     end
 
@@ -2156,7 +2185,7 @@ end
 // 4.12 Global Stall Signal
 // --------------------------------------------------------------------------
 
-wire mem_stall = (ex2_mem_mem_read || ex2_mem_mem_write) && ex2_mem_valid &&
+wire mem_stall = (ex2_mem_mem_read || (ex2_mem_mem_write && !sc_fail)) && ex2_mem_valid &&
                  !ex2_mem_exc_pending && !dmem_ready;
 wire fetch_stall = imem_req && !imem_ready;
 assign global_stall = mem_stall || div_stall || amo_stall;
@@ -2386,7 +2415,7 @@ assign pc_stall = hazard_stall || global_stall || fetch_stall || debug_stall || 
         end
     end
 
-    assign if2_imem_pmp_fault = if1_if2_valid && ifetch_pmp_match && !ifetch_pmp_allow_x;
+    assign if2_imem_pmp_fault = if1_if2_valid_eff && ifetch_pmp_match && !ifetch_pmp_allow_x;
 
     // --- LR/SC Reservation ---
     reg [31:0] lr_address;
@@ -2403,7 +2432,7 @@ assign pc_stall = hazard_stall || global_stall || fetch_stall || debug_stall || 
             if (ex2_mem_is_lr && ex2_mem_valid && !ex2_mem_exc_pending && dmem_ready) begin
                 lr_valid   <= 1'b1;
                 lr_address <= ex2_mem_result;
-            end else if (ex2_mem_is_sc && ex2_mem_valid && !ex2_mem_exc_pending) begin
+            end else if (ex2_mem_is_sc && ex2_mem_valid && !ex2_mem_exc_pending && dmem_ready) begin
                 lr_valid <= 1'b0;
             end else if (ex2_mem_mem_write && ex2_mem_valid && !ex2_mem_exc_pending &&
                          !ex2_mem_is_sc && lr_valid &&
@@ -2503,7 +2532,7 @@ assign pc_stall = hazard_stall || global_stall || fetch_stall || debug_stall || 
     end
 
     // --- Data Memory Interface ---
-    wire sc_fail = ex2_mem_is_sc && !sc_success;
+    assign sc_fail = ex2_mem_is_sc && !sc_success;
 
     assign dmem_addr  = {ex2_mem_result[31:2], 2'b00};
     assign dmem_wdata = (amo_state == 2'd2) ? amo_write_data : store_data;
