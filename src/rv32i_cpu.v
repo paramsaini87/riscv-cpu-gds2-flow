@@ -927,9 +927,13 @@ module rv32i_cpu #(
     // Exception from compressed decode
     wire if2_c_illegal = if2_is_compressed && c_illegal;
 
-    // Track bus error propagation
+    // I-Fetch PMP fault — combinational check declared near data PMP (after CSR arrays)
+    // Forward declaration of wire — assigned after csr_pmpcfg/csr_pmpaddr declarations
+    wire if2_imem_pmp_fault;
+
+    // Track bus error propagation (includes I-fetch PMP fault)
     wire if2_bus_error_out = (if2_process_comp_held || if2_process_comp_hi) ? 1'b0 :
-                             if1_if2_bus_error;
+                             (if1_if2_bus_error || if2_imem_pmp_fault);
 
     // PC for this instruction (must reflect actual byte address)
     wire [31:0] if2_pc_out = if2_process_comp_held  ? if2_held_pc :
@@ -2332,6 +2336,58 @@ assign pc_stall = hazard_stall || global_stall || fetch_stall || debug_stall || 
     wire dmem_store_error = ex2_mem_mem_write && ex2_mem_valid && !ex2_mem_exc_pending &&
                             dmem_error && dmem_ready;
 
+    // =========================================================================
+    // I-Fetch PMP Check — execute (X) permission on instruction address
+    // Checks if1_if2_pc against all 16 PMP regions (same matching modes as data PMP)
+    // =========================================================================
+    reg        ifetch_pmp_match;
+    reg        ifetch_pmp_allow_x;
+
+    always @(*) begin
+        ifetch_pmp_match   = 1'b0;
+        ifetch_pmp_allow_x = 1'b1;  // M-mode default: allow if no PMP match
+
+        begin : ifetch_pmp_check_block
+            integer j;
+            reg [1:0]  if_a_field;
+            reg [31:0] if_pmp_lo, if_pmp_hi;
+            reg        if_region_match;
+            reg        if_locked;
+
+            for (j = 0; j < 16; j = j + 1) begin
+                if_a_field = csr_pmpcfg[j/4][(j%4)*8 + 4 -: 2];
+                if_locked  = csr_pmpcfg[j/4][(j%4)*8 + 7];
+
+                case (if_a_field)
+                    2'b00: if_region_match = 1'b0; // OFF
+                    2'b01: begin // TOR
+                        if_pmp_lo = (j == 0) ? 32'd0 : {csr_pmpaddr[j-1], 2'b00};
+                        if_pmp_hi = {csr_pmpaddr[j], 2'b00};
+                        if_region_match = (if1_if2_pc >= if_pmp_lo) && (if1_if2_pc < if_pmp_hi);
+                    end
+                    2'b10: begin // NA4
+                        if_region_match = (if1_if2_pc[31:2] == csr_pmpaddr[j][29:0]);
+                    end
+                    2'b11: begin // NAPOT
+                        if_pmp_lo = {(csr_pmpaddr[j] + 32'd1) & csr_pmpaddr[j], 2'b00};
+                        if_pmp_hi = if_pmp_lo | {(csr_pmpaddr[j] ^ (csr_pmpaddr[j] + 32'd1)), 2'b11};
+                        if_region_match = (if1_if2_pc >= if_pmp_lo) && (if1_if2_pc <= if_pmp_hi);
+                    end
+                    default: if_region_match = 1'b0;
+                endcase
+
+                if (if_region_match && !ifetch_pmp_match) begin
+                    ifetch_pmp_match = 1'b1;
+                    if (if_locked) begin
+                        ifetch_pmp_allow_x = csr_pmpcfg[j/4][(j%4)*8 + 2];
+                    end
+                end
+            end
+        end
+    end
+
+    assign if2_imem_pmp_fault = if1_if2_valid && ifetch_pmp_match && !ifetch_pmp_allow_x;
+
     // --- LR/SC Reservation ---
     reg [31:0] lr_address;
     reg        lr_valid;
@@ -2693,8 +2749,8 @@ assign pc_stall = hazard_stall || global_stall || fetch_stall || debug_stall || 
             csr_minstret      <= 64'd0;
             csr_mhpmcnt3      <= 64'd0;
             csr_mhpmcnt4      <= 64'd0;
-            csr_mhpmevent3    <= 32'd0;
-            csr_mhpmevent4    <= 32'd0;
+            csr_mhpmevent3    <= 32'd1;     // Bit[0] = branch misprediction events
+            csr_mhpmevent4    <= 32'd2;     // Bit[1] = load-use stall events
             // PMP config
             csr_pmpcfg[0]     <= 32'd0;
             csr_pmpcfg[1]     <= 32'd0;

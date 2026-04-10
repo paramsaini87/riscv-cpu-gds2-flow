@@ -26,6 +26,11 @@ module tb_rv32i_cpu;
     // Unified memory — 64KB (16K x 32-bit words)
     reg [31:0] mem [0:16383];
 
+    // Initialize memory to zero (prevents X propagation from uninitialized locations)
+    integer mem_init_i;
+    initial for (mem_init_i = 0; mem_init_i < 16384; mem_init_i = mem_init_i + 1)
+        mem[mem_init_i] = 32'h0;
+
     // TOHOST address: 0x1000 -> word index 0x400
     localparam TOHOST_WORD = 14'h400;
 

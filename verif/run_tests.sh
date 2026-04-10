@@ -58,6 +58,10 @@ run_test() {
     if [ "${test_name}" = "test_nmi_during_irq" ]; then
         extra_flags="${extra_flags} -DWFI_TIMER_CYCLES=80 -DNMI_CYCLES=120"
     fi
+    # Add external interrupt for MEIP test
+    if [ "${test_name}" = "test_ext_irq" ]; then
+        extra_flags="${extra_flags} -DEXT_IRQ_CYCLES=80"
+    fi
     TOTAL=$((TOTAL + 1))
 
     printf "  [%-24s] " "${test_name}${suffix}"

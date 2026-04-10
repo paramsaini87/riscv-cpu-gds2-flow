@@ -3321,6 +3321,162 @@ def gen_test_hpm_verify():
     return write_test('test_hpm_verify', p)
 
 
+# ============================================================================
+# GAP FIX: External IRQ test (mcause=0x8000000B)
+# ============================================================================
+def gen_test_ext_irq():
+    """External interrupt: verify MEIP handling, mcause=0x8000000B.
+    Requires -DEXT_IRQ_CYCLES=80."""
+    CSR_MSTATUS = 0x300
+    CSR_MIE     = 0x304
+    CSR_MTVEC   = 0x305
+    CSR_MCAUSE  = 0x342
+    p = Program()
+
+    p.JAL('x0', 'setup')
+
+    p.label('handler')
+    p.CSRRS('x10', CSR_MCAUSE, 'x0')
+    # Disable MEIE (bit 11) to prevent re-entry
+    p.LI('x5', 0x800)
+    p.CSRRC('x0', CSR_MIE, 'x5')
+    p.ADDI('x12', 'x0', 1)             # flag: handler ran
+    p.MRET()
+
+    p.label('setup')
+    # Set mtvec to handler (direct mode)
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+
+    # Enable MEIE (bit 11 of mie)
+    p.LI('x5', 0x800)
+    p.CSRRS('x0', CSR_MIE, 'x5')
+    # Enable global MIE (bit 3 of mstatus)
+    p.ADDI('x5', 'x0', 0x08)
+    p.CSRRS('x0', CSR_MSTATUS, 'x5')
+
+    # Spin loop waiting for interrupt
+    p.ADDI('x12', 'x0', 0)
+    p.ADDI('x15', 'x0', 0)
+    p.label('wait')
+    p.ADDI('x15', 'x15', 1)
+    p.BNE('x12', 'x0', 'done')
+    p.LI('x7', 10000)
+    p.BNE('x15', 'x7', 'wait')
+    p.J('fail')
+
+    p.label('done')
+    # Verify mcause = 0x8000000B (machine external interrupt)
+    p.LI('x7', 0x8000000B)
+    p.BNE('x10', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_ext_irq', p)
+
+
+# ============================================================================
+# GAP FIX: C.ADDI4SPN test
+# ============================================================================
+def gen_test_c_addi4spn():
+    """C.ADDI4SPN: rd' = sp + zero-extended scaled immediate."""
+    p = Program()
+
+    # Set sp (x2) to a known value
+    p.LI('x2', 0x1000)
+
+    # C.ADDI4SPN x8, sp, 32  → x8 = x2 + 32 = 0x1020
+    p.C_ADDI4SPN('x8', 32)
+    p.LI('x7', 0x1020)
+    p.BNE('x8', 'x7', 'fail')
+
+    # C.ADDI4SPN x9, sp, 4  → x9 = x2 + 4 = 0x1004
+    p.C_ADDI4SPN('x9', 4)
+    p.LI('x7', 0x1004)
+    p.BNE('x9', 'x7', 'fail')
+
+    # C.ADDI4SPN x10, sp, 1020  → x10 = x2 + 1020 = 0x13FC
+    p.C_ADDI4SPN('x10', 1020)
+    p.LI('x7', 0x13FC)
+    p.BNE('x10', 'x7', 'fail')
+
+    # C.ADDI4SPN x11, sp, 8  → x11 = x2 + 8 = 0x1008
+    p.C_ADDI4SPN('x11', 8)
+    p.LI('x7', 0x1008)
+    p.BNE('x11', 'x7', 'fail')
+
+    p.PASS()
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_c_addi4spn', p)
+
+
+# ============================================================================
+# GAP FIX: I-Fetch PMP test (instruction access fault, mcause=1)
+# ============================================================================
+def gen_test_ifetch_pmp():
+    """I-Fetch PMP: lock a code region, verify instruction access fault (mcause=1).
+    Set PMP0 to lock a region with R+W but no X, then jump into it."""
+    CSR_MTVEC    = 0x305
+    CSR_MEPC     = 0x341
+    CSR_MCAUSE   = 0x342
+    CSR_MTVAL    = 0x343
+    CSR_PMPCFG0  = 0x3A0
+    CSR_PMPADDR0 = 0x3B0
+    CSR_PMPADDR1 = 0x3B1
+    p = Program()
+
+    p.JAL('x0', 'skip_handler')
+
+    p.label('trap_handler')
+    p.CSRRS('x20', CSR_MCAUSE, 'x0')
+    p.CSRRS('x21', CSR_MEPC, 'x0')
+    p.ADDI('x22', 'x22', 1)            # fault counter
+    # Advance mepc past the faulting JALR (4 bytes) back in main code
+    # We know the JALR that faults is at a known PC — just skip to 'check'
+    # Use AUIPC-based relative address calculation
+    p.CSRRW('x0', CSR_MEPC, 'x30')     # x30 holds resume address
+    p.MRET()
+
+    p.label('skip_handler')
+    # Install trap handler
+    p.ADDI('x5', 'x0', 4)
+    p.CSRRW('x0', CSR_MTVEC, 'x5')
+    p.ADDI('x22', 'x0', 0)
+
+    # Store resume address (check label) into x30 before triggering fault
+    p.JAL('x30', 'check_setup')
+    p.label('check')
+    # Verify we trapped with mcause=1 (instruction access fault)
+    p.ADDI('x7', 'x0', 1)
+    p.BNE('x20', 'x7', 'fail')
+    # Verify fault counter
+    p.BEQ('x22', 'x0', 'fail')
+
+    p.PASS()
+
+    p.label('check_setup')
+    # x30 now holds address of 'check' (return address from JAL)
+
+    # PMP0 TOR: 0x0800 to 0x0900 — locked, R+W only (no X)
+    p.LI('x5', 0x200)
+    p.CSRRW('x0', CSR_PMPADDR0, 'x5')
+    p.LI('x5', 0x240)
+    p.CSRRW('x0', CSR_PMPADDR1, 'x5')
+
+    # PMP1 cfg: TOR(A=01), L=1, R=1, W=1, X=0 → 0x8B = 1_00_01_011
+    p.LI('x5', 0x00008B00)
+    p.CSRRW('x0', CSR_PMPCFG0, 'x5')
+
+    # Jump into protected region (0x0800) — should trigger instruction access fault
+    p.LI('x5', 0x0800)
+    p.JALR('x0', 'x5', 0)
+    p.label('fail')
+    p.FAIL(99)
+    return write_test('test_ifetch_pmp', p)
+
+
 ALL_TESTS = [
     ('test_addi',       gen_test_addi,       'ADDI (6 cases: basic, negative, -1, x0, max, min)'),
     ('test_add',        gen_test_add,        'ADD (4 cases: basic, neg+pos, zero, overflow)'),
@@ -3422,6 +3578,10 @@ ALL_TESTS = [
     ('test_csri_zero',        gen_test_csri_zero,        'CSR immediate uimm=0 edge cases'),
     ('test_c_halfword_align', gen_test_c_halfword_align, 'Compressed at 2-byte boundary (not 4-byte)'),
     ('test_hpm_verify',       gen_test_hpm_verify,       'HPM counter verification + inhibit'),
+    # GAP FIX: External IRQ, C.ADDI4SPN, I-Fetch PMP
+    ('test_ext_irq',          gen_test_ext_irq,          'MEIP: external interrupt (mcause=0x8000000B)'),
+    ('test_c_addi4spn',       gen_test_c_addi4spn,       'C.ADDI4SPN: sp + scaled immediate'),
+    ('test_ifetch_pmp',       gen_test_ifetch_pmp,       'I-Fetch PMP: locked no-X region → mcause=1'),
 ]
 
 if __name__ == '__main__':
